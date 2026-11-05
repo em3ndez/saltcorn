@@ -1,0 +1,56 @@
+FROM eclipse-temurin:21-jdk-jammy AS temurin_jdk_21
+FROM node:20
+
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH="$JAVA_HOME/bin:$PATH"
+
+COPY --from=temurin_jdk_21 "$JAVA_HOME" "$JAVA_HOME"
+RUN java -version
+
+RUN apt update && apt install -y wget unzip jq
+
+# install android commandline tools and sdk
+RUN wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline-tools.zip
+RUN unzip cmdline-tools.zip
+RUN mkdir android_sdk
+
+RUN yes | cmdline-tools/bin/sdkmanager --sdk_root=android_sdk --install "cmdline-tools;latest"
+RUN android_sdk/cmdline-tools/latest/bin/sdkmanager --list
+RUN android_sdk/cmdline-tools/latest/bin/sdkmanager "platforms;android-35"
+RUN android_sdk/cmdline-tools/latest/bin/sdkmanager "build-tools;35.0.0"
+
+# download gradle
+RUN wget -q https://services.gradle.org/distributions/gradle-8.9-all.zip \
+  && unzip gradle-8.9-all.zip -d /opt
+
+# create an empty project, the first init seems to take longer
+WORKDIR /init_project
+RUN npm init -y
+RUN mkdir www
+RUN touch www/index.html
+RUN npm install @capacitor/cli@7.4.4 @capacitor/core@7.4.4 @capacitor/android@7.4.4
+RUN npx cap init MyApp com.example.myapp --web-dir www
+RUN npx cap add android
+RUN npx cap sync
+
+ENV ANDROID_SDK_ROOT=/android_sdk
+ENV ANDROID_HOME=/android_sdk
+ENV GRADLE_HOME=/opt/gradle-8.9
+ENV PATH=$PATH:/opt/gradle-8.9/bin
+
+RUN echo "distributionBase=GRADLE_USER_HOME\n\
+distributionPath=wrapper/dists\n\
+distributionUrl=file:/gradle-8.9-all.zip\n\
+networkTimeout=10000\n\
+validateDistributionUrl=true\n\
+zipStoreBase=GRADLE_USER_HOME\n\
+zipStorePath=wrapper/dists" > /init_project/android/gradle/wrapper/gradle-wrapper.properties
+
+WORKDIR /init_project/android
+RUN ./gradlew assembleDebug
+
+WORKDIR /
+COPY entry.bash ./
+RUN chmod +x entry.bash
+
+ENTRYPOINT ["./entry.bash"]

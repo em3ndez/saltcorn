@@ -1,0 +1,119 @@
+// For the typedoc documentation
+
+import Crash from "./crash.js";
+import EventLog from "./eventlog.js";
+import Field from "./field.js";
+import FieldRepeat from "./fieldrepeat.js";
+import File from "./file.js";
+import Form from "./form.js";
+import Library from "./library.js";
+import Page from "./page.js";
+import PageGroup from "./page_group.js";
+import Plugin from "./plugin.js";
+import Role from "./role.js";
+import TableConstraint from "./table_constraints.js";
+import Table from "./table.js";
+import Trigger from "./trigger.js";
+import User from "./user.js";
+import View from "./view.js";
+import Workflow from "./workflow.js";
+import WorkflowRun from "./workflow_run.js";
+import WorkflowStep from "./workflow_step.js";
+import WorkflowTrace from "./workflow_trace.js";
+
+export {
+  Crash,
+  EventLog,
+  Field,
+  FieldRepeat,
+  File,
+  Form,
+  Library,
+  Page,
+  PageGroup,
+  Plugin,
+  Role,
+  TableConstraint,
+  Table,
+  Trigger,
+  User,
+  View,
+  Workflow,
+  WorkflowRun,
+  WorkflowStep,
+  WorkflowTrace,
+};
+
+import * as configImport from "./config.js";
+export namespace config {
+  export const {
+    getConfig,
+    getAllConfig,
+    setConfig,
+    deleteConfig,
+    configTypes,
+    remove_from_menu,
+    available_languages,
+    get_latest_npm_version,
+    get_base_url,
+    save_menu_items,
+    check_email_mask,
+  } = configImport;
+}
+
+import * as discoveryImport from "./discovery.js";
+export namespace discovery {
+  export const {
+    discoverable_tables,
+    discover_tables,
+    implement_discovery,
+    get_existing_views,
+    findType,
+    make_field,
+    reconcile_table,
+  } = discoveryImport;
+}
+
+import * as emailImport from "./email.js";
+export namespace email {
+  export const { getMailTransport, viewToEmailHtml, send_verification_email } =
+    emailImport;
+}
+
+import * as expressionImport from "./expression.js";
+export namespace expression {
+  export const {
+    expressionValidator,
+    apply_calculated_fields,
+    get_async_expression_function,
+    get_expression_function,
+    eval_expression,
+    recalculate_for_stored,
+    transform_for_async,
+    apply_calculated_fields_stored,
+    jsexprToWhere,
+  } = expressionImport;
+}
+
+import * as layoutImport from "./layout.js";
+export namespace layout {
+  export const {
+    eachView,
+    getViews,
+    traverse,
+    traverseSync,
+    getStringsForI18n,
+    translateLayout,
+  } = layoutImport;
+}
+
+import * as randomImport from "./random.js";
+export namespace random {
+  export const { random_table, fill_table_row, initial_view, all_views } =
+    randomImport;
+}
+
+import * as schedulerImport from "./scheduler.js";
+export namespace scheduler {
+  export const runScheduler = schedulerImport;
+}

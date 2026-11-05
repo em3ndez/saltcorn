@@ -4,10 +4,14 @@
  * @subcategory components / elements
  */
 
-import React, { useContext, Fragment } from "react";
+/* globals validate_bool_expression_elem */
+
+import React, { Fragment, useState, useContext, useEffect, useRef } from "react";
 import { useNode } from "@craftjs/core";
+import useTranslation from "../../hooks/useTranslation";
 import optionsCtx from "../context";
-import { blockProps, BlockSetting, TextStyleRow } from "./utils";
+import { blockProps, BlockSetting, TextStyleRow, setAPropGen } from "./utils";
+import { SingleLineEditor } from "./MonacoEditor";
 
 export /**
  * @param {object} props
@@ -30,9 +34,13 @@ const DropDownFilter = ({ name, block, full_width }) => {
       {...blockProps(block)}
       ref={(dom) => connect(drag(dom))}
     >
-      <select disabled={true} className={full_width ? "w-100" : ""}>
-        <option>{name}</option>
-      </select>
+      <input
+        readOnly
+        value={name}
+        className={`${
+          full_width ? "w-100" : "w-unset"
+        } form-control form-select ${!block ? "d-inline" : ""}`}
+      />
     </span>
   );
 };
@@ -44,37 +52,55 @@ export /**
  * @subcategory components
  */
 const DropDownFilterSettings = () => {
+  const { t } = useTranslation();
   const {
     actions: { setProp },
     name,
     block,
     neutral_label,
+    label_formula,
     full_width,
     where,
+    all_options,
+    apply_select2,
   } = useNode((node) => ({
     name: node.data.props.name,
     block: node.data.props.block,
     neutral_label: node.data.props.neutral_label,
     full_width: node.data.props.full_width,
+    label_formula: node.data.props.label_formula,
     where: node.data.props.where,
+    all_options: node.data.props.all_options,
+    apply_select2: node.data.props.apply_select2,
   }));
   const options = useContext(optionsCtx);
+  const setAProp = setAPropGen(setProp);
+  const editorRef = useRef(null);
+  let select_all_options;
+  const field = options.fields.find((f) => f.name === name);
+  if (field?.type === "String" && field.attributes?.options)
+    select_all_options = true;
   return (
     <table className="w-100">
       <tbody>
         <tr>
           <td>
-            <label>Field</label>
+            <label>{t("Field")}</label>
           </td>
           <td>
             <select
               value={name}
-              className="form-control"
-              onChange={(e) => setProp((prop) => (prop.name = e.target.value))}
+              className="field form-control form-select"
+              onChange={setAProp("name")}
             >
               {options.fields.map((f, ix) => (
                 <option key={ix} value={f.name}>
                   {f.label}
+                </option>
+              ))}
+              {options.parent_field_list.map((f, ix) => (
+                <option key={ix} value={f}>
+                  {f}
                 </option>
               ))}
             </select>
@@ -82,28 +108,45 @@ const DropDownFilterSettings = () => {
         </tr>
         <tr>
           <td>
-            <label>Neutral label</label>
+            <label>{t("Neutral label")}</label>
           </td>
           <td>
             <input
               value={neutral_label}
               className="form-control"
-              onChange={(e) =>
-                setProp((prop) => (prop.neutral_label = e.target.value))
+              onChange={setAProp("neutral_label")}
+            />
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <label>{t("Where")}</label>
+          </td>
+          <td>
+            <SingleLineEditor
+              ref={editorRef}
+              value={where}
+              setProp={setProp}
+              propKey="where"
+              onInput={(value) =>
+                validate_bool_expression_elem(value, editorRef.current)
               }
             />
           </td>
         </tr>
         <tr>
           <td>
-            <label>Where</label>
+            <label>{t("Label formula")}</label>
           </td>
           <td>
             <input
-              value={where}
+              value={label_formula}
               className="form-control"
-              onChange={(e) => setProp((prop) => (prop.where = e.target.value))}
+              onChange={setAProp("label_formula")}
             />
+            <i>
+              In scope: <code>{name}</code>
+            </i>
           </td>
         </tr>
         <tr>
@@ -121,21 +164,53 @@ const DropDownFilterSettings = () => {
                 name="block"
                 type="checkbox"
                 checked={full_width}
-                onChange={(e) =>
-                  setProp((prop) => (prop.full_width = e.target.checked))
-                }
+                onChange={setAProp("full_width", { checked: true })}
               />
-              <label className="form-check-label">Full width</label>
+              <label className="form-check-label">{t("Full width")}</label>
             </div>
           </td>
         </tr>
+        {select_all_options ? (
+          <tr>
+            <td></td>
+            <td>
+              <div className="form-check">
+                <input
+                  className="form-check-input"
+                  name="block"
+                  type="checkbox"
+                  checked={all_options}
+                  onChange={setAProp("all_options", { checked: true })}
+                />
+                <label className="form-check-label">{t("All options")}</label>
+              </div>
+            </td>
+          </tr>
+        ) : null}
+        {options.has_select2 ? (
+          <tr>
+            <td></td>
+            <td>
+              <div className="form-check">
+                <input
+                  className="form-check-input"
+                  name="block"
+                  type="checkbox"
+                  checked={apply_select2}
+                  onChange={setAProp("apply_select2", { checked: true })}
+                />
+                <label className="form-check-label">{t("Apply select2")}</label>
+              </div>
+            </td>
+          </tr>
+        ) : null}
       </tbody>
     </table>
   );
 };
 
-/** 
- * @type {object} 
+/**
+ * @type {object}
  */
 DropDownFilter.craft = {
   displayName: "DropDownFilter",
@@ -147,8 +222,11 @@ DropDownFilter.craft = {
       { name: "name", segment_name: "field_name", column_name: "field_name" },
       "full_width",
       "neutral_label",
+      "label_formula",
       "where",
+      "all_options",
       "block",
+      "apply_select2",
     ],
   },
 };

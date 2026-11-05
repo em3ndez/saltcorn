@@ -1,0 +1,192 @@
+const { join } = require("path");
+
+const mocksDir = join(__dirname, "dist", "mobile-mocks");
+const webpack = require("webpack");
+
+const nodeMocks = {
+  "latest-version": join(mocksDir, "node", "latest-version"),
+  fs: join(mocksDir, "node", "fs"),
+  assert: join(mocksDir, "node", "assert"),
+  "fs-extra": join(mocksDir, "node", "fs-extra"),
+  "fs/promises": join(mocksDir, "node", "fs", "promises"),
+  // stream-browserify (the "stream" fallback) has no promises submodule, so
+  // "stream/promises" would otherwise resolve into the middle of its index.js
+  "stream/promises": join(mocksDir, "node", "stream", "promises"),
+  v8: join(mocksDir, "node", "v8"),
+  async_hooks: join(mocksDir, "node", "async_hooks"),
+  child_process: join(mocksDir, "node", "child_process"),
+  vm: join(mocksDir, "node", "vm"),
+  module: join(mocksDir, "node", "module"),
+  "../package.json": join(__dirname, "package.json"),
+};
+
+const npmMocks = {
+  "npm-registry-fetch": join(mocksDir, "npm", "npm-registry-fetch"),
+  "env-paths": join(mocksDir, "npm", "env-paths"),
+  "fs-extended-attributes": join(mocksDir, "npm", "fs-extended-attributes"),
+  tar: join(mocksDir, "npm", "tar"),
+  "live-plugin-manager": join(mocksDir, "npm", "live-plugin-manager"),
+  "firebase-admin": join(mocksDir, "npm", "firebase-admin"),
+  dockerode: join(mocksDir, "npm", "dockerode"),
+  xml2js: join(mocksDir, "npm", "xml2js"),
+  apns2: join(mocksDir, "npm", "apns2"),
+  vm2: join(mocksDir, "npm", "vm2"),
+  "@aws-sdk/client-s3": join(mocksDir, "npm", "aws-sdk-client-s3"),
+  "@aws-sdk/s3-request-presigner": join(
+    mocksDir,
+    "npm",
+    "aws-sdk-s3-request-presigner"
+  ),
+};
+
+const saltcornMocks = {
+  "@saltcorn/plugins-loader/plugin_installer": join(
+    mocksDir,
+    "saltcorn",
+    "plugins-loader-plugin-installer"
+  ),
+  "@saltcorn/admin-models/models/tenant": join(
+    mocksDir,
+    "saltcorn",
+    "admin-models-tenant"
+  ),
+  "./internal/async_json_stream": join(
+    mocksDir,
+    "models",
+    "internal",
+    "async_json_stream"
+  ),
+  "../models/internal/async_json_stream": join(
+    mocksDir,
+    "models",
+    "internal",
+    "async_json_stream"
+  ),
+  "./pack": join(mocksDir, "models", "pack"),
+  "../models/pack": join(mocksDir, "models", "pack"),
+  "./email": join(mocksDir, "models", "email"),
+  "../models/email": join(mocksDir, "models", "email"),
+  "./internal/mail_queue": join(mocksDir, "models", "internal", "mail_queue"),
+  "../models/internal/mail_queue": join(
+    mocksDir,
+    "models",
+    "internal",
+    "mail_queue"
+  ),
+  "../plugin-testing": join(mocksDir, "saltcorn", "plugin-testing"),
+  "../../plugin-testing": join(mocksDir, "saltcorn", "plugin-testing"),
+  "@saltcorn/html-pdf-node": join(mocksDir, "saltcorn", "html-pdf-node"),
+  "./html-pdf-node": join(mocksDir, "saltcorn", "html-pdf-node"),
+  "../migrate": join(mocksDir, "saltcorn", "migrate"),
+};
+
+// The ESM dist imports relative/subpath modules WITH explicit ".js" extensions
+// (e.g. `from "../models/email.js"`), but webpack matches alias keys against the
+// raw request string. Without this expansion the extensionless keys silently
+// stop matching and the real (server-only) modules get bundled. Add a ".js"
+// variant for every key so both forms resolve to the mock.
+const withJsVariants = (map) => {
+  const out = {};
+  for (const [k, v] of Object.entries(map)) {
+    out[k] = v;
+    if (!/\.[cm]?js$/.test(k)) out[`${k}.js`] = v;
+  }
+  return out;
+};
+
+const dbMocks = {
+  "@saltcorn/sqlite/sqlite": join(mocksDir, "db", "sqlite"),
+  "@saltcorn/postgres/postgres": join(mocksDir, "db", "postgres"),
+};
+
+module.exports = {
+  externals: {
+    "@saltcorn/sqlite": "@saltcorn/sqlite",
+    "@saltcorn/postgres": "@saltcorn/postgres",
+    "cpu-features": "commonjs cpu-features",
+  },
+  optimization: {
+    minimize: false, // debug
+    //runtimeChunk: "single",
+    splitChunks: {
+      chunks: "all",
+      name: "common_chunks",
+    },
+  },
+  entry: {
+    data: {
+      import: join(__dirname, "./dist/index.js"),
+    },
+  },
+  output: {
+    path: __dirname,
+    filename: "bundle/[name].bundle.js",
+    libraryTarget: "umd",
+    library: ["saltcorn", "[name]"],
+  },
+  resolve: {
+    fallback: {
+      url: false,
+      tls: false,
+      dns: false,
+      net: false,
+      http2: false,
+      querystring: false,
+      punycode: require.resolve("punycode/"),
+      console: require.resolve("console-browserify"),
+      assert: require.resolve("assert/"),
+      path: require.resolve("path-browserify"),
+      crypto: require.resolve("crypto-browserify"),
+      buffer: require.resolve("buffer/"),
+      stream: require.resolve("stream-browserify"),
+      http: require.resolve("stream-http"),
+      https: require.resolve("https-browserify"),
+      util: require.resolve("util/"),
+      os: require.resolve("os-browserify/browser"),
+      vm: require.resolve("vm-browserify"),
+      zlib: require.resolve("browserify-zlib"),
+      constants: require.resolve("constants-browserify"),
+      events: require.resolve("events/"),
+      string_decoder: require.resolve("string_decoder/"),
+      // The $ marks an exact match - otherwise webpack turns a request for
+      // "process/browser" into "<target>/browser", doubling the suffix.
+      "process$": require.resolve("process/browser"),
+      "process/browser$": require.resolve("process/browser"),
+    },
+    alias: {
+      ...withJsVariants(nodeMocks),
+      ...withJsVariants(npmMocks),
+      ...withJsVariants(saltcornMocks),
+      ...withJsVariants(dbMocks),
+    },
+  },
+  module: {
+    rules: [
+      {
+        test: /\.js$/,
+        exclude: /node_modules/,
+      },
+      // Allow extensionless imports inside dependencies (e.g. ProvidePlugin's
+      // "process/browser") without webpack's ESM "fully specified" requirement.
+      {
+        test: /\.m?js$/,
+        resolve: { fullySpecified: false },
+      },
+    ],
+  },
+  plugins: [
+    // Strip the "node:" scheme so prefixed builtin imports (e.g. "node:stream")
+    // hit the browser fallbacks/mocks configured above instead of failing as an
+    // unhandled URI scheme.
+    new webpack.NormalModuleReplacementPlugin(/^node:/, (resource) => {
+      resource.request = resource.request.replace(/^node:/, "");
+    }),
+    new webpack.ProvidePlugin({
+      process: "process/browser",
+      Buffer: ["buffer", "Buffer"],
+    }),
+    new webpack.DefinePlugin({
+      "process.env.IGNORE_DYNAMIC_REQUIRE": JSON.stringify("true"),
+    }),
+  ],
+};

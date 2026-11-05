@@ -4,7 +4,8 @@
  * @subcategory components / elements
  */
 
-import React from "react";
+import React, { Fragment, useContext } from "react";
+import useTranslation from "../../hooks/useTranslation";
 import { useNode } from "@craftjs/core";
 import {
   blockProps,
@@ -12,6 +13,7 @@ import {
   SettingsFromFields,
   TextStyleSetting,
 } from "./utils";
+import optionsCtx from "../context";
 
 export /**
  * @param {object} props
@@ -26,25 +28,45 @@ const HTMLCode = ({ text }) => {
     selected,
     connectors: { connect, drag },
   } = useNode((node) => ({ selected: node.events.selected }));
+  const { t } = useTranslation();
   return (
     <span
       className={`is-html-block ${selected ? "selected-node" : ""}`}
       ref={(dom) => connect(drag(dom))}
     >
-      <div style={{ fontSize: "8px" }}>HTML</div>
+      <div style={{ fontSize: "8px" }}>{t("HTML")}</div>
       <div dangerouslySetInnerHTML={{ __html: text }}></div>
     </span>
   );
 };
 
-const fields = [
-  {
-    label: "HTML Code",
-    name: "text",
-    type: "textarea",
-    segment_name: "contents"
-  },
-];
+const fields = (mode) => {
+  return [
+    {
+      label: "HTML Code",
+      name: "text",
+      input_type: "code",
+      type: "code",
+      attributes: { mode: "text/html" },
+      segment_name: "contents",
+      onSave: (segment, node_props) => {
+        const div = document.createElement("div");
+        div.innerHTML = (node_props.text || "").trim();
+        const children = []; // Type: Node[]
+        const walker = document.createTreeWalker(div, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          const s = walker.currentNode.data?.trim?.();
+          if (s && !(s.startsWith("{{") && s.endsWith("}}"))) children.push(s);
+        }
+        segment.text_strings = [...new Set(children.sort())];
+      },
+      sublabel:
+        mode === "show" || mode === "list"
+          ? "Access fields with <code>{{ var_name }}</code>"
+          : undefined,
+    },
+  ];
+};
 
 /**
  * @type {object}
@@ -52,10 +74,14 @@ const fields = [
 HTMLCode.craft = {
   displayName: "HTMLCode",
   related: {
-    settings: SettingsFromFields(fields),
+    settings: () => {
+      const options = useContext(optionsCtx);
+
+      return SettingsFromFields(fields(options.mode))();
+    },
     segment_type: "blank",
     segment_vars: { isHTML: true },
     segment_match: (segment) => segment.isHTML,
-    fields,
+    fields: fields(),
   },
 };

@@ -2,10 +2,38 @@
  * @category saltcorn-cli
  * @module commands/create-user
  */
-const { Command, flags } = require("@oclif/command");
-const { cli } = require("cli-ux");
-const { maybe_as_tenant } = require("../common");
+const { Command, Flags } = require("@oclif/core");
+const { maybe_as_tenant, init_some_tenants } = require("../common");
+const inquirer = require("inquirer").default;
 
+const promptEmailPassword = async (flags) => {
+  let email = flags.email;
+  let password = flags.password;
+  if (!email) {
+    const answersEmail = await inquirer.prompt([
+      {
+        name: "email",
+        message: "Email address",
+        type: "input",
+      },
+    ]);
+    email = answersEmail.email;
+  }
+  if (!password) {
+    const answersPassword = await inquirer.prompt([
+      {
+        name: "password",
+        message: "Password",
+        type: "password",
+        mask: "*",
+      },
+    ]);
+    password = answersPassword.password;
+  }
+  return { email, password };
+};
+
+// todo update logic based on modify-user command
 /**
  * CreateUserCommand Class
  * @extends oclif.Command
@@ -17,14 +45,18 @@ class CreateUserCommand extends Command {
    */
   async run() {
     const User = require("@saltcorn/data/models/user");
-    const { flags } = this.parse(CreateUserCommand);
+
+    const { flags } = await this.parse(CreateUserCommand);
     if (flags.admin && flags.role && flags.role !== "admin") {
       console.error("Error: specify at most one of admin and role");
       this.exit(1);
     }
+    // init tenant
+    await init_some_tenants(flags.tenant);
 
+    // run function as specified tenant
     await maybe_as_tenant(flags.tenant, async () => {
-      let role_id = flags.admin ? 1 : 8;
+      let role_id = flags.admin ? 1 : 80;
       if (flags.role) {
         const roles = await User.get_roles();
         const role = roles.find((r) => r.role === flags.role);
@@ -34,10 +66,17 @@ class CreateUserCommand extends Command {
         }
         role_id = role.id;
       }
-      const email = flags.email || (await cli.prompt("Email address"));
-      const password =
-        flags.password || (await cli.prompt("Password", { type: "hide" }));
-      await User.create({ email, password, role_id });
+      const { email, password } = await promptEmailPassword(flags);
+      const u = await User.create({ email, password, role_id });
+      if (u instanceof User)
+        console.log(
+          `Success: User ${email} created successfully ${
+            typeof flags.tenant !== "undefined"
+              ? "in tenant " + flags.tenant
+              : ""
+          }`
+        );
+      else console.error(`Error: ${u.error}`);
     });
     this.exit(0);
   }
@@ -52,20 +91,20 @@ CreateUserCommand.description = `Create a new user`;
  * @type {object}
  */
 CreateUserCommand.flags = {
-  admin: flags.boolean({ char: "a", description: "Admin user" }),
-  tenant: flags.string({
+  admin: Flags.boolean({ char: "a", description: "Admin user" }),
+  tenant: Flags.string({
     char: "t",
     description: "tenant",
   }),
-  email: flags.string({
+  email: Flags.string({
     char: "e",
     description: "email",
   }),
-  role: flags.string({
+  role: Flags.string({
     char: "r",
     description: "role",
   }),
-  password: flags.string({
+  password: Flags.string({
     char: "p",
     description: "password",
   }),

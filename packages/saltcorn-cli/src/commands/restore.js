@@ -2,10 +2,11 @@
  * @category saltcorn-cli
  * @module commands/restore
  */
-const { Command, flags } = require("@oclif/command");
+const { Command, Flags, Args } = require("@oclif/core");
 const { spawnSync } = require("child_process");
 const path = require("path");
-const { maybe_as_tenant } = require("../common");
+const { maybe_as_tenant, init_some_tenants } = require("../common");
+const fs = require("fs");
 
 /**
  * RestoreCommand Class
@@ -14,8 +15,8 @@ const { maybe_as_tenant } = require("../common");
  */
 class RestoreCommand extends Command {
   /**
-   * 
-   * @param {string} fnm 
+   *
+   * @param {string} fnm
    * @returns {Promise<void>}
    */
   async pg_restore(fnm) {
@@ -35,19 +36,21 @@ class RestoreCommand extends Command {
   }
 
   /**
-   * 
-   * @param {string} fnm 
-   * @param {object} tenant 
+   *
+   * @param {string} fnm
+   * @param {object} tenant
    * @returns {Promise<void>}
    */
   async zip_restore(fnm, tenant) {
-    const { restore } = require("@saltcorn/data/models/backup");
+    const { restore } = require("@saltcorn/admin-models/models/backup");
     const User = require("@saltcorn/data/models/user");
-    const load_plugins = require("@saltcorn/server/load_plugins");
+    const Plugin = require("@saltcorn/data/models/plugin");
+    await init_some_tenants(tenant);
+
     await maybe_as_tenant(tenant, async () => {
-      await load_plugins.loadAllPlugins();
+      await Plugin.loadAllPlugins();
       const hasUsers = await User.nonEmpty();
-      const savePlugin = (p) => load_plugins.loadAndSaveNewPlugin(p);
+      const savePlugin = (p) => Plugin.loadAndSaveNewPlugin(p);
       const err = await restore(fnm, savePlugin, !hasUsers);
       if (err) {
         console.error(err);
@@ -60,7 +63,7 @@ class RestoreCommand extends Command {
    * @returns {Promise<void>}
    */
   async run() {
-    const { args, flags } = this.parse(RestoreCommand);
+    const { args, flags } = await this.parse(RestoreCommand);
     switch (path.extname(args.file)) {
       case ".sqlc":
         if (flags.tenant) {
@@ -72,6 +75,32 @@ class RestoreCommand extends Command {
       case ".zip":
         this.zip_restore(args.file, flags.tenant);
         break;
+      case ".json":
+        if (!args.file.includes("domain_files.json")) {
+          console.error("unknown filetype: " + path.extname(args.file));
+          this.exit(1);
+        }
+        const fileConts = fs.readFileSync(args.file);
+        const domain_files = JSON.parse(fileConts);
+        const {
+          insertTenant,
+          getAllTenants,
+          switchToTenant,
+        } = require("@saltcorn/admin-models/models/tenant");
+        const { add_tenant } = require("@saltcorn/data/db/state");
+
+        let existing_tenants = new Set(await getAllTenants());
+        existing_tenants.add("public");
+        for (const [tenant, fnm] of Object.entries(domain_files)) {
+          console.log("restore", tenant, "from", fnm);
+          if (!existing_tenants.has(tenant)) {
+            const tenrow = await insertTenant(tenant);
+            add_tenant(tenant);
+            await switchToTenant(tenrow);
+          }
+          await this.zip_restore(fnm, tenant === "public" ? undefined : tenant);
+        }
+        break;
       default:
         console.error("unknown filetype: " + path.extname(args.file));
         this.exit(1);
@@ -82,9 +111,9 @@ class RestoreCommand extends Command {
 /**
  * @type {object}
  */
-RestoreCommand.args = [
-  { name: "file", required: true, description: "backup file to restore" },
-];
+RestoreCommand.args = {
+  file: Args.string({ required: true, description: "backup file to restore" }),
+};
 
 /**
  * @type {string}
@@ -92,10 +121,15 @@ RestoreCommand.args = [
 RestoreCommand.description = `Restore a previously backed up database (zip or sqlc format)`;
 
 /**
+ * @type {string}
+ */
+RestoreCommand.help = `Restore a previously backed up database (zip or sqlc format)`;
+
+/**
  * @type {object}
  */
 RestoreCommand.flags = {
-  tenant: flags.string({
+  tenant: Flags.string({
     char: "t",
     description: "tenant",
   }),

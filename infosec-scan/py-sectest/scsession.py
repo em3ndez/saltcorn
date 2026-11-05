@@ -2,22 +2,81 @@ from sectest import Session
 import re
 import subprocess
 import os 
+from helpers import wait_for_port_open
+import threading
+import logging
+
+logging.basicConfig(
+  level=logging.INFO,
+  format='[%(asctime)s] %(levelname)s - %(message)s',
+  datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+logger = logging.getLogger(__name__)
 
 class SaltcornSession(Session):
-  def __init__(self, port=3001):
-    self.salcorn_process = subprocess.Popen(["packages/saltcorn-cli/bin/saltcorn", "serve", "-p", str(port)])
-    Session.__init__(self, 'http://localhost:%d/' % port)
-    self.wait_for_port_open()
+  def __init__(self, port=3001, open_process=True, env_vars=None, pipe_output=False):
+    self.salcorn_process = None
+    self._last_csrf = ''
+    self.open(port, open_process, env_vars, pipe_output)
 
   def __del__(self):
     self.close()
 
   def csrf(self):
     m = re.findall('_sc_globalCsrf = "([^"]*)"', self.content)
-    return m[0]
+    if len(m) > 0:
+      return m[0]
+    else:
+      return ""
+
+  def get(self, url, allow_redirects=False, timeout=30):
+    super().get(url, allow_redirects=allow_redirects, timeout=timeout)
+    token = self.csrf()
+    if token:
+      self._last_csrf = token
+
+  def apiPost(self, url, data, allow_redirects=False, extra_headers=None):
+    super().apiPost(url, data, allow_redirects=allow_redirects,
+                    extra_headers=extra_headers, csrf_token=self._last_csrf or None)
 
   def close(self):
-    self.salcorn_process.kill()
+    if self.salcorn_process is not None:
+      self.salcorn_process.kill()
+
+  def open(self, port=3001, open_process=True, env_vars=None, pipe_output=False):
+    if open_process is True:
+      env = os.environ.copy()
+
+      if env_vars:
+        for key, value in env_vars.items():
+            env[key] = str(value)
+
+      stdout_setting = subprocess.PIPE if pipe_output else None
+      stderr_setting = subprocess.STDOUT if pipe_output else None
+
+      self.salcorn_process = subprocess.Popen(
+          ["packages/saltcorn-cli/bin/saltcorn", "serve", "-p", str(port), "--subdomain_offset", "1"],
+          env=env,
+          stdout=stdout_setting,
+          stderr=stderr_setting,
+          text=True,
+          bufsize=1
+      )
+
+      if pipe_output:
+        def stream_output(pipe):
+          for line in iter(pipe.readline, ""):
+            logger.info("[saltcorn] %s", line.rstrip())
+
+        # background thread so pytest does not block
+        threading.Thread(
+            target=stream_output,
+            args=(self.salcorn_process.stdout,),
+            daemon=True
+        ).start()
+    Session.__init__(self, 'http://localhost:%d/' % port)
+    wait_for_port_open(self.base_url)    
 
   @staticmethod
   def reset_to_fixtures():
@@ -26,8 +85,12 @@ class SaltcornSession(Session):
 
   @staticmethod
   def cli(*args):
-    subprocess.run(["packages/saltcorn-cli/bin/saltcorn"]+list(args), check=True)
-
+    result = subprocess.run(["packages/saltcorn-cli/bin/saltcorn"]+list(args),
+                             capture_output = True,
+                             check= True,
+                             text = True)
+    return result.stdout.strip()
+                             
   @staticmethod
   def asset_path(name):
     return os.path.join(os.path.dirname(os.path.realpath(__file__)), "assets", name)

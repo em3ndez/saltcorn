@@ -1,0 +1,140 @@
+import Table from "../models/table.js";
+import TableConstraint from "../models/table_constraints.js";
+import Field from "../models/field.js";
+import View from "../models/view.js";
+import db from "../db/index.js";
+import { getState } from "../db/state.js";
+import basePluginMod from "../base-plugin/index.js";
+import resetSchemaMod from "../db/reset_schema.js";
+import fixturesMod from "../db/fixtures.js";
+getState()!.registerPlugin("base", basePluginMod);
+import * as discovery from "../models/discovery.js";
+const { discoverable_tables, discover_tables, implement_discovery } = discovery;
+import { writeFile } from "fs/promises";
+import * as mocks from "./mocks.js";
+const { rick_file, plugin_with_routes, mockReqRes, createDefaultView } = mocks;
+import {
+  assertIsSet,
+  assertsIsSuccessMessage,
+  assertIsErrorMsg,
+  assertIsType,
+} from "./assertions.js";
+import { afterAll, describe, it, expect, beforeAll, jest } from "@saltcorn/db-common/test_expect";
+import {
+  add_free_variables_to_joinfields,
+  stateFieldsToQuery,
+  stateFieldsToWhere,
+} from "../plugin-helper.js";
+import * as expressionModule from "../models/expression.js";
+import {
+  PrimaryKeyValue,
+  Row,
+  sqlBinOp,
+  sqlFun,
+  Where,
+} from "@saltcorn/db-common/internal";
+import { ResultMessage } from "@saltcorn/types/common_types";
+const { freeVariables, jsexprToWhere, add_free_variables_to_aggregations } =
+  expressionModule;
+
+afterAll(db.close);
+beforeAll(async () => {
+  await resetSchemaMod();
+  await fixturesMod();
+  if (!db.isSQLite) {
+    await db.query(
+      `create table tstcomppk ( name text, age int, address text, primary key(name,age));`
+    );
+    const pack = await discover_tables(["tstcomppk"]);
+    await implement_discovery(pack);
+  }
+});
+jest.setTimeout(30000);
+
+describe("Composite PK table properties", () => {
+  if (!db.isSQLite) {
+    it("should store attributes", async () => {
+      const tc = Table.findOne("tstcomppk")!;
+      assertIsSet(tc);
+      expect(tc.composite_pk_names?.length).toBe(2);
+      expect(tc.composite_pk_names).toContain("name");
+      expect(tc.composite_pk_names).toContain("age");
+      expect(tc.pk_name).toBe("age");
+    });
+    it("should insert", async () => {
+      const tc = Table.findOne("tstcomppk")!;
+      assertIsSet(tc);
+      await tc.insertRow({ name: "Sam", age: 38 });
+      const count = await tc.countRows({});
+      expect(count).toBe(1);
+      const rows = await tc.getRows({ name: "Sam", age: 38 });
+      expect(rows.length).toBe(1);
+      expect(rows[0].age).toBe(38);
+    });
+    it("should update", async () => {
+      const tc = Table.findOne("tstcomppk")!;
+      assertIsSet(tc);
+      await tc.insertRow({ name: "Alex", age: 38 });
+      await tc.updateRow(
+        { name: "Sammy" },
+        {
+          name: "Sam",
+          age: 38,
+        }
+      );
+
+      const rows = await tc.getRows({ age: 38 });
+      expect(rows.length).toBe(2);
+      const names = rows.map((r) => r.name);
+      expect(names).toContain("Alex");
+      expect(names).toContain("Sammy");
+    });
+    it("should delete", async () => {
+      const tc = Table.findOne("tstcomppk")!;
+      assertIsSet(tc);
+      await tc.deleteRows({ name: "Sammy", age: 38 });
+
+      const rows = await tc.getRows({ age: 38 });
+      expect(rows.length).toBe(1);
+      expect(rows[0].name).toBe("Alex");
+    });
+
+    it("should create Edit view", async () => {
+      const tc = Table.findOne("tstcomppk")!;
+      assertIsSet(tc);
+      const view = await createDefaultView(tc, "Edit", 1);
+      expect(view.configuration.columns.length).toBe(3);
+      await view.runPost(
+        {},
+        { name: "Fred", age: 10, address: "29 Park Road" },
+        mockReqRes
+      );
+      await view.runPost(
+        {},
+        { name: "Peter", age: 10, address: "4 Beach Road" },
+        mockReqRes
+      );
+      const rows0 = await tc.getRows({ name: "Peter" });
+      expect(rows0.length).toBe(1);
+      expect(rows0[0].address).toBe("4 Beach Road");
+
+      const rows = await tc.getRows({ name: "Fred" });
+      expect(rows.length).toBe(1);
+      expect(rows[0].address).toBe("29 Park Road");
+      await view.runPost(
+        {},
+        { name: "Fred", age: 10, address: "25 Park Road" },
+        mockReqRes
+      );
+      const rows1 = await tc.getRows({ name: "Fred" });
+      expect(rows1.length).toBe(1);
+      expect(rows1[0].address).toBe("25 Park Road");
+      const rows2 = await tc.getRows({ name: "Peter" });
+      expect(rows2.length).toBe(1);
+      expect(rows2[0].address).toBe("4 Beach Road");
+    });
+  } else
+    it("should add 2 and 2", async () => {
+      expect(2 + 2).toBe(4);
+    });
+});

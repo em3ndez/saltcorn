@@ -1,0 +1,44 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/plain-date/tsconfig.ref.json"
+    },
+    {
+      "path": "./packages/db-common/tsconfig.ref.json"
+    },
+    {
+      "path": "./packages/saltcorn-types/tsconfig.ref.json"
+    },
+    {
+      "path": "./packages/sqlite/tsconfig.ref.json"
+    },
+    {
+      "path": "./packages/postgres/tsconfig.ref.json"
+    },
+    {
+      "path": "./packages/sqlite-mobile/tsconfig.ref.json"
+    },
+    {
+      "path": "./packages/saltcorn-markup/tsconfig.ref.json"
+    },
+    {
+      "path": "./packages/common-code/tsconfig.ref.json"
+    },
+    {
+      "path": "./packages/saltcorn-data/tsconfig.ref.json"
+    },
+    {
+      "path": "./packages/plugins-loader/tsconfig.ref.json"
+    },
+    {
+      "path": "./packages/saltcorn-admin-models/tsconfig.ref.json"
+    },
+    {
+      "path": "./packages/server/tsconfig.ref.json"
+    },
+    {
+      "path": "./packages/saltcorn-mobile-builder/tsconfig.ref.json"
+    }
+  ]
+}

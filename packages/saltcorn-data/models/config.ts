@@ -1,0 +1,2204 @@
+/**
+ * Config Variables
+ * @category saltcorn-data
+ * @module models/config
+ * @subcategory models
+ */
+import { getConfigFile, configFilePath } from "../db/connect.js";
+import { set_tenant_base_url, getState } from "../db/state.js";
+import { jsexprToWhere, get_expression_function } from "./expression.js";
+import { InvalidConfiguration } from "../utils.js";
+import fetchLib from "node-fetch";
+const fetch: any = fetchLib; // NodeNext default-import interop for node-fetch
+import db from "../db/index.js";
+
+import { writeFileSync } from "fs";
+import momentTz from "moment-timezone";
+const { tz } = momentTz;
+import * as utils from "../utils.js";
+import { Req } from "@saltcorn/types/base_types";
+import { isNode, sleep, ensure_final_slash } from "../utils.js";
+const allTimezones = tz.names();
+const defaultTimezone = tz.guess();
+
+/**
+ * Config variables types
+ * @namespace
+ * @category saltcorn-data
+ */
+const configTypes: ConfigTypes = {
+  site_name: {
+    type: "String",
+    label: "Site name",
+    default: "Saltcorn",
+    blurb: "A short string which is the name of your site",
+  },
+  timezone: {
+    type: "String",
+    label: "Home Timezone",
+    default: defaultTimezone,
+    attributes: {
+      options: allTimezones,
+      selectizable: true,
+    },
+  },
+  site_logo_id: {
+    type: "File",
+    label: "Site logo",
+    default: 0,
+    attributes: {
+      select_file_where: { min_role_read: 100, mime_super: "image" },
+    },
+    blurb: "Select a publicly accessible image file for the menu logo",
+  },
+  favicon_id: {
+    type: "File",
+    label: "Favicon",
+    default: 0,
+    attributes: {
+      select_file_where: { min_role_read: 100, mime_super: "image" },
+    },
+    blurb: "Select a publicly accessible image file for the browser tab icon",
+  },
+  base_url: {
+    type: "String",
+    label: "Base URL",
+    excludeFromSnapshot: true,
+    default: "",
+    onChange(val: string) {
+      const tenant = db.getTenantSchema();
+      const isRoot = tenant === db.connectObj.default_schema;
+      if (!isRoot && val) {
+        set_tenant_base_url(tenant, val);
+      }
+    },
+    blurb:
+      "The URL at which your site is available. For instance, https://example.com/",
+  },
+  last_offline_session: {
+    type: "Object",
+    label: "User with offline data",
+    default: "",
+    blurb:
+      "This is the email of the last user who created offline data in the mobile app.",
+  },
+  mobile_sync_timestamp: {
+    type: "Date",
+    label: "Last mobile sync",
+    default: null,
+    blurb:
+      "This is the timestamp up to which data has been synced to the mobile app.",
+  },
+  mobile_builder_settings: {
+    type: "Object",
+    label: "Mobile builder settings",
+    default: {},
+    blurb:
+      "This is an object to remember the settings of the mobile builder menu.",
+  },
+  sync_info_schema_version: {
+    type: "Integer",
+    label: "Sync info schema version",
+    default: -1,
+    blurb:
+      "Tracks the schema version of the mobile sync_info tables. Used by the mobile app to run incremental migrations.",
+  },
+  menu_items: { type: "hidden", label: "Menu items" },
+  unrolled_menu_items: { type: "hidden", label: "Menu items" },
+
+  globalSearch: { type: "hidden", label: "Global search" },
+  available_packs: {
+    type: "hidden",
+    label: "Available packs",
+    excludeFromSnapshot: true,
+    excludeFromMobile: true,
+  },
+  available_packs_fetched_at: {
+    type: "Date",
+    label: "Available packs fetched",
+    excludeFromSnapshot: true,
+    excludeFromMobile: true,
+  },
+  available_plugins: {
+    type: "hidden",
+    label: "Available plugins",
+    excludeFromSnapshot: true,
+    excludeFromMobile: true,
+  },
+  available_plugins_fetched_at: {
+    type: "Date",
+    excludeFromSnapshot: true,
+    label: "Available plugins fetched",
+    excludeFromMobile: true,
+  },
+  home_page_by_role: { type: "hidden", label: "Home Page by Role" },
+  exttables_min_role_read: {
+    type: "hidden",
+    label: "Home Page by Role",
+    default: {},
+  },
+  public_home: { type: "String", label: "Public home page", default: "" },
+  user_home: { type: "String", label: "User home page", default: "" },
+  staff_home: { type: "String", label: "Staff home page", default: "" },
+  admin_home: { type: "String", label: "Admin home page", default: "" },
+  layout_by_role: { type: "hidden", label: "Layout by role", default: {} },
+  twofa_policy_by_role: {
+    type: "hidden",
+    label: "2FA policy by role",
+    default: {},
+  },
+  push_policy_by_role: {
+    type: "hidden",
+    label: "Push notifications policy by role",
+    default: {},
+  },
+  auth_method_by_role: {
+    type: "hidden",
+    label: "Authentication method by role",
+    default: {},
+  },
+  allow_signup: {
+    type: "Bool",
+    label: "Allow signups",
+    default: true,
+    blurb: "Allow users to sign up for a new user account",
+  },
+  allow_forgot: {
+    type: "Bool",
+    label: "Allow password reset",
+    default: false,
+    blurb:
+      "Allow users to request a password reset email. Email must be configured.",
+  },
+  login_menu: {
+    type: "Bool",
+    label: "Login in menu",
+    default: true,
+    blurb: "Show the login link in the menu",
+  },
+  cookie_sessions: {
+    type: "Bool",
+    label: "Cookie sessions",
+    default: false,
+    root_only: true,
+    restart_required: true,
+    blurb: "Store sessions entirely in client cookies for higher performance",
+    excludeFromMobile: true,
+  },
+  new_user_form: {
+    type: "View users",
+    label: "New user view",
+    default: "",
+    blurb:
+      "A view to show to new users, to finalise registration (if Edit) or as a welcome view",
+  },
+  user_settings_form: {
+    type: "View users",
+    label: "User settings form",
+    default: "",
+    blurb: "A view for users to change their custom user fields",
+  },
+  login_form: {
+    type: "View users",
+    label: "Login view",
+    blurb: "A view with the login form",
+    default: "",
+  },
+  reset_password_email_view: {
+    type: "View users",
+    label: "Reset password view",
+    blurb:
+      "A view that will be emailed to users when they have forgotten their password",
+    default: "",
+  },
+  signup_form: {
+    type: "View users",
+    label: "Signup view",
+    blurb: "A view with the signup form",
+    default: "",
+  },
+  verification_view: {
+    type: "View users",
+    label: "Verification view",
+    blurb:
+      "A view with the view to be emailed to users for email address verification",
+    default: "",
+    excludeFromMobile: true,
+  },
+  logout_url: {
+    type: "String",
+    label: "Logout URL",
+    blurb: "The URL to direct to after logout",
+    default: "/auth/login",
+  },
+  elevate_verified: {
+    type: "Role",
+    label: "Elevate verified to role",
+    blurb:
+      "Elevate users to a higher role when their email addresses have been verified",
+  },
+  plain_password_triggers: {
+    type: "Bool",
+    label: "Plain password trigger row",
+    default: false,
+    blurb:
+      "Send plaintext password changes to Users table triggers (Insert, Update and Validate).",
+    excludeFromMobile: true, // unsure
+  },
+  signup_role: {
+    type: "Role",
+    label: "Signup role",
+    blurb: "The initial role of signed up users",
+    default: "80",
+    required: true,
+  },
+  min_password_length: {
+    type: "Integer",
+    label: "Minimum password length",
+    default: 8,
+    required: true,
+    blurb:
+      "The minimum length of passwords for users. Set to 0 to disable password requirements.",
+    excludeFromMobile: true,
+  },
+  check_common_passwords: {
+    type: "Bool",
+    label: "Check common passwords",
+    default: true,
+    blurb:
+      "Check if the password is in the list of common passwords. If enabled, users will not be able to use common passwords.",
+    excludeFromMobile: true,
+  },
+  password_require_uppercase: {
+    type: "Bool",
+    label: "Require uppercase",
+    default: false,
+    blurb: "Require at least one uppercase letter in the password",
+    excludeFromMobile: true,
+  },
+  password_require_lowercase: {
+    type: "Bool",
+    label: "Require lowercase",
+    default: true,
+    blurb: "Require at least one lowercase letter in the password",
+    excludeFromMobile: true,
+  },
+  password_require_number: {
+    type: "Bool",
+    label: "Require number",
+    default: false,
+    blurb: "Require at least one number in the password",
+    excludeFromMobile: true,
+  },
+  password_require_special_char: {
+    type: "Bool",
+    label: "Require special character",
+    default: false,
+    blurb: "Require at least one special character in the password",
+    excludeFromMobile: true,
+  },
+  password_complexity: {
+    type: "String",
+    label: "Password complexity",
+    default: "",
+    blurb:
+      "The regular expression that passwords must match. Set to empty string to disable password complexity requirements.",
+    excludeFromMobile: true,
+  },
+  password_complexity_error: {
+    type: "String",
+    label: "Password complexity error",
+    default: "",
+    blurb:
+      "The error message to show when password does not match the complexity requirements.",
+    excludeFromMobile: true,
+  },
+  min_role_upload: {
+    type: "Role",
+    label: "Role to upload files",
+    default: "80",
+    required: true,
+    blurb:
+      "User should have this role or higher to upload files with API (uploads through forms are not affected)",
+    excludeFromMobile: true,
+  },
+  min_role_apikeygen: {
+    type: "Role",
+    label: "Role to generate API keys",
+    default: "1",
+    required: true,
+    blurb:
+      "User should have this role or higher to generate API keys in their user settings",
+    excludeFromMobile: true,
+  },
+  email_mask: {
+    type: "String",
+    label: "Email mask",
+    default: "",
+    blurb: "Emails used for signup must end with this string",
+    excludeFromMobile: true,
+  },
+  installed_packs: {
+    type: "String[]",
+    label: "Installed packs",
+    default: [],
+    excludeFromMobile: true,
+  },
+  log_sql: {
+    type: "Bool",
+    label: "Log SQL to stdout",
+    excludeFromSnapshot: true,
+    default: false,
+    onChange(val: boolean) {
+      db.set_sql_logging(val);
+    },
+    blurb: "Print all SQL statements to the standard output",
+  },
+  log_client_errors: {
+    type: "Bool",
+    label: "Log client errors",
+    excludeFromSnapshot: true,
+    default: false,
+    root_only: true,
+    blurb: "Record all client errors in the crash log",
+  },
+  disable_csrf_routes: {
+    type: "String",
+    label: "Disable CSRF routes",
+    default: "",
+    restart_required: true,
+    blurb:
+      "Comma-separated list of relative URL route prefixes where CSRF token checking is disabled. Example: <code>/files/upload, /auth/signup</code>",
+  },
+  npm_available_js_code: {
+    type: "String",
+    label: "NPM packages in code",
+    default: "",
+    restart_required: true,
+    blurb:
+      "Comma-separated list of packages which will be available in JavaScript actions. Set version with <code>{package name}=={version number}</code>",
+    async onChange(val: string) {
+      setTimeout(async () => {
+        await getState()!.refresh_npmpkgs();
+      });
+    },
+  },
+  multitenancy_enabled: {
+    type: "Bool",
+    root_only: true,
+    restart_required: true,
+    excludeFromSnapshot: true,
+    helpTopic: "Multitenancy",
+    label: "Multitenancy enabled",
+    default: db.is_it_multi_tenant(),
+    onChange(val: boolean) {
+      set_multitenancy_cfg(val);
+    },
+  },
+  role_to_create_tenant: {
+    type: "Role",
+    label: "Role to create tenants",
+    blurb: `Minimum user role required to create a new tenant<div class="alert alert-danger fst-normal" role="alert" data-show-if="showIfFormulaInputs($('select[name=role_to_create_tenant]'), '+role_to_create_tenant>1')">Giving non-trusted users access to create tenants is a security risk and not recommended.</div>`,
+    default: "1",
+    required: true,
+    root_only: true,
+    excludeFromMobile: true,
+  },
+  create_tenant_warning: {
+    type: "Bool",
+    label: "Create tenant warning",
+    default: true,
+    root_only: true,
+    blurb:
+      "Show a warning to users creating a tenant disclaiming warranty of availability or security",
+    excludeFromMobile: true,
+  },
+  create_tenant_warning_text: {
+    type: "String",
+    fieldview: "textarea",
+    label: "Create tenant warning text",
+    default: "",
+    root_only: true,
+    blurb: "Provide your own create warning text if need",
+    excludeFromMobile: true,
+  },
+  tenant_template: {
+    type: "Tenant",
+    label: "New tenant template",
+    blurb: "Copy site structure for new tenants from this tenant",
+    root_only: true,
+    excludeFromMobile: true,
+  },
+  tenant_baseurl: {
+    type: "String",
+    root_only: true,
+    label: "Tenant Base URL",
+    blurb:
+      "Base hostname for newly created tenants. If unset, defaults to hostname",
+    excludeFromMobile: true,
+  },
+  tenant_create_unauth_redirect: {
+    type: "String",
+    root_only: true,
+    label: "Redirect unauthorized",
+    blurb: "If tenant creation is not authorized, redirect to this URL",
+    excludeFromMobile: true,
+  },
+  tenants_install_git: {
+    type: "Bool",
+    root_only: true,
+    label: "Install git plugins",
+    excludeFromMobile: true, // unsure
+  },
+  tenants_set_npm_modules: {
+    type: "Bool",
+    root_only: true,
+    label: "Set available npm modules",
+    excludeFromMobile: true, // unsure
+  },
+  tenants_crash_log: {
+    type: "Bool",
+    root_only: true,
+    label: "Crash log",
+    blurb: "Delegate error handling to tenants",
+    excludeFromMobile: true, // unsure
+    default: false,
+  },
+  tenants_unsafe_plugins: {
+    type: "Bool",
+    root_only: true,
+    label: "Unsafe modules",
+    excludeFromMobile: true, // unsure
+  },
+  tenant_inherit_cfgs: {
+    type: "String",
+    root_only: true,
+    label: "Inherit configuration values",
+    helpTopic: "Configuration keys",
+    blurb:
+      "Comma-separated list of configuration settings tenants inherit from root. Ex: <code>site_name, smtp_host, allow_signup</code>",
+    excludeFromMobile: true, // unsure
+  },
+  tenant_letsencrypt_sites: {
+    type: "hidden",
+    root_only: true,
+    label: "Tenant LetsEncrypt sites",
+    default: [],
+    excludeFromMobile: true,
+  },
+  development_mode: {
+    type: "Bool",
+    label: "Development mode",
+    excludeFromSnapshot: true,
+    default: false,
+    blurb: "Show full error to user on crash, enable editing field type",
+  },
+  smtp_host: {
+    type: "String",
+    label: "SMTP host",
+    default: "",
+    blurb:
+      "The host address of your SMTP server. For instance, smtp.postmarkapp.com",
+    excludeFromMobile: true,
+  },
+  smtp_auth_method: {
+    type: "String",
+    label: "SMTP auth method",
+    default: "password",
+    blurb:
+      "The authentication method used by your SMTP server. Usually, it is 'password'.",
+    excludeFromMobile: true,
+    options: ["password", "oauth2"],
+    input_type: "select",
+  },
+  smtp_api_option: {
+    type: "String",
+    label: "API options",
+    default: "",
+    blurb: "The API options to access SMTP server for sending emails. ",
+    options: ["SMTP", "Graph"],
+    input_type: "select",
+    excludeFromMobile: true,
+  },
+  smtp_authorize_url: {
+    type: "String",
+    label: "authorize URL",
+    default: "",
+    blurb: "",
+    excludeFromMobile: true,
+  },
+  smtp_token_url: {
+    type: "String",
+    label: "token URL",
+    default: "",
+    blurb: "",
+    excludeFromMobile: true,
+  },
+
+  smtp_redirect_uri: {
+    type: "String",
+    label: "redirect URI",
+    default: "",
+    blurb: "",
+    excludeFromMobile: true,
+  },
+  smtp_client_id: {
+    type: "String",
+    label: "OAuth client ID",
+    default: "",
+    blurb: "The client ID to access SMTP server for sending emails. ",
+    excludeFromMobile: true,
+  },
+  smtp_client_secret: {
+    type: "String",
+    label: "OAuth client secret",
+    default: "",
+    input_type: "password",
+    blurb: "The client secret to access SMTP server for sending emails. ",
+    excludeFromMobile: true,
+  },
+  smtp_outh_scopes: {
+    type: "String",
+    label: "OAuth scopes",
+    default: "",
+    blurb: "The scopes to access SMTP server for sending emails. ",
+    excludeFromMobile: true,
+  },
+  smtp_oauth_token_data: {
+    type: "JSON",
+    label: "OAuth token data",
+    default: "",
+  },
+  smtp_username: {
+    type: "String",
+    label: "SMTP username",
+    default: "",
+    blurb: "The user name to access SMTP server for sending emails.",
+    excludeFromMobile: true,
+  },
+  smtp_password: {
+    type: "String",
+    label: "SMTP password",
+    default: "",
+    input_type: "password",
+    blurb:
+      "The user password or app password to access SMTP server for sending emails. " +
+      "If your SMTP provider allows to create app password for using from application " +
+      "We recommends to use app password instead of user password.",
+    excludeFromMobile: true,
+  },
+  smtp_port: {
+    type: "Integer",
+    label: "SMTP port",
+    default: "25",
+    blurb: "The port of your SMTP server",
+    excludeFromMobile: true,
+  },
+  smtp_secure: {
+    type: "Bool",
+    label: "Force TLS",
+    default: false,
+    sublabel:
+      "Always use TLS when connecting to server? If unchecked, TLS is used if server supports the STARTTLS extension. In most cases check this box if you are connecting to port 465. For port 587 or 25 keep it unchecked",
+    excludeFromMobile: true,
+  },
+  smtp_timeout_seconds: {
+    type: "Integer",
+    label: "Timeout (seconds)",
+    default: 120,
+    attributes: { min: 1 },
+    sublabel:
+      "How long to wait for the mail server to accept the connection, and how " +
+      "long to allow it to go silent mid-send, before giving up. A send that " +
+      "exceeds this fails and is not retried, so raise this rather than lower " +
+      "it if your mail server is slow.",
+    excludeFromMobile: true,
+  },
+  smtp_allow_self_signed: {
+    type: "Bool",
+    label: "Allow self-signed",
+    default: false,
+    sublabel:
+      "Open a connection to TLS server with self-signed or invalid TLS certificate",
+    excludeFromMobile: true,
+  },
+  email_from: {
+    type: "String",
+    label: "Email from address",
+    default: "",
+    blurb:
+      "The email address from which emails are sent. For instance, hello@saltcorn.com",
+    excludeFromMobile: true,
+  },
+  email_wait_timestamp: {
+    type: "hidden",
+    label: "Timestamp when email wait ends",
+    default: null,
+    excludeFromMobile: true,
+    ephemeral: true,
+  },
+  custom_ssl_certificate: {
+    type: "String",
+    fieldview: "textarea",
+    label: "Custom SSL certificate",
+    default: "",
+    excludeFromSnapshot: true,
+    hide_value: true,
+    excludeFromMobile: true,
+  },
+  custom_ssl_private_key: {
+    type: "String",
+    fieldview: "textarea",
+    label: "Custom SSL private key",
+    hide_value: true,
+    excludeFromSnapshot: true,
+    default: "",
+    excludeFromMobile: true,
+  },
+  letsencrypt: {
+    label: "LetsEncrypt enabled",
+    default: false,
+    type: "hidden",
+    root_only: true,
+    excludeFromSnapshot: true,
+    blurb: "Enable SSL certificate from Let's Encrypt for HTTPS traffic",
+    excludeFromMobile: true,
+  },
+  airgap: {
+    type: "Bool",
+    label: "Air gap deployment",
+    blurb:
+      "Disable updates from NPM and Saltcorn module store for isolated network environments",
+  },
+  timeout: {
+    type: "Integer",
+    label: "HTTP timeout (s)",
+    default: 120,
+    root_only: true,
+    restart_required: true,
+    sublabel: "Increase if you expect large uploads",
+  },
+  latest_npm_version: {
+    type: "hidden",
+    label: "Latest npm version cache",
+    excludeFromSnapshot: true,
+    default: {},
+    excludeFromMobile: true,
+  },
+  saltcorn_npm_versions: {
+    type: "hidden",
+    label: "@saltcorn/cli npm versions",
+    excludeFromSnapshot: true,
+    default: {},
+    excludeFromMobile: true,
+  },
+  default_standard_field_labels: {
+    type: "hidden",
+    label: "User-defined labels for standard fields",
+    default: {},
+    excludeFromMobile: true,
+  },
+  event_log_settings: {
+    type: "hidden",
+    label: "Event log settings",
+    default: {},
+  },
+  custom_events: {
+    type: "hidden",
+    label: "Custom events",
+    default: [],
+  },
+  page_custom_css: {
+    input_type: "code",
+    label: "Custom CSS",
+    default: "",
+    hide_value: true,
+    attributes: { mode: "text/css" },
+  },
+  page_custom_html: {
+    input_type: "code",
+    label: "Custom HTML",
+    default: "",
+    hide_value: true,
+    attributes: { mode: "text/html" },
+  },
+  page_custom_html_valid: {
+    type: "hidden",
+    label: "Custom HTML is valid",
+    default: true,
+  },
+  suppress_toasts: {
+    type: "Bool",
+    label: "Suppress toasts",
+    default: false,
+    blurb: "Do not show any toast notifications to users",
+  },
+  custom_http_headers: {
+    input_type: "code",
+    label: "Custom HTTP headers",
+    blurb: "Format for each line: Header-Name: value",
+    default: "",
+    hide_value: true,
+    attributes: { mode: "message/http" },
+  },
+  next_hourly_event: {
+    type: "Date",
+    label: "Next hourly event",
+    excludeFromSnapshot: true,
+    default: null,
+  },
+  next_daily_event: {
+    type: "Date",
+    label: "Next daily event",
+    default: null,
+    excludeFromSnapshot: true,
+  },
+  next_weekly_event: {
+    type: "Date",
+    label: "Next weekly event",
+    excludeFromSnapshot: true,
+    default: null,
+  },
+  enable_dynamic_updates: {
+    type: "Bool",
+    label: "Enable dynamic updates",
+    default: true,
+    blurb: "Enable server side updates from within run_js_code actions",
+  },
+  scheduler_tick_seconds: {
+    type: "Integer",
+    label: "Scheduler tick (seconds)",
+    default: 300,
+    attributes: { min: 10 },
+    blurb:
+      "How often the scheduler wakes up to look for work. This is the interval " +
+      "at which Often triggers run, and the finest resolution available to Cron " +
+      "triggers. Shorter ticks schedule more precisely at the cost of more " +
+      "frequent database activity in every tenant.",
+    excludeFromMobile: true,
+  },
+  default_locale: {
+    type: "String",
+    label: "Default locale",
+    sublabel: "Locale identifier short code, e.g. en, zh, fr, ar etc. ",
+    default: "en",
+  },
+  localizer_languages: {
+    type: "hidden",
+    label: "Localizer languages",
+    default: {},
+  },
+  localizer_strings: {
+    type: "hidden",
+    label: "Localizer strings",
+    default: {},
+  },
+  legacy_file_id_locations: {
+    type: "hidden",
+    label: "Legacy file_id locations",
+    default: {},
+  },
+  function_code_pages: {
+    type: "hidden",
+    label: "Function code pages",
+    default: {},
+  },
+  function_code_pages_tags: {
+    type: "hidden",
+    label: "Function code pages tags",
+    default: {},
+  },
+  cookie_duration: {
+    type: "Integer",
+    label: "Cookie duration (hours)",
+    sublabel: "Set to 0 for expiration at the end of browser session",
+    default: 30 * 24,
+    excludeFromMobile: true,
+  },
+  cookie_samesite: {
+    input_type: "select",
+    label: "SameSite",
+    restart_required: true,
+    root_only: true,
+    sublabel:
+      "Restrict use of cookie to third-party sites. Strict is more secure, but may impact authentication",
+    default: "Unset",
+    options: ["Unset", "None", "Lax", "Strict"],
+    excludeFromMobile: true,
+  },
+  force_secure_cookies: {
+    type: "Bool",
+    label: "Force secure cookies",
+    restart_required: true,
+    root_only: true,
+    sublabel:
+      "Set the Secure flag on session cookies. Enable when Saltcorn runs behind an HTTPS reverse proxy (nginx, Cloudflare, etc.). Automatically enabled when Let's Encrypt or a custom SSL certificate is configured.",
+    default: false,
+    excludeFromMobile: true,
+  },
+  content_security_policy: {
+    input_type: "select",
+    label: "Content Security Policy",
+    default: "Disabled",
+    options: ["Disabled", "Enabled"],
+    restart_required: true,
+    root_only: true,
+    excludeFromMobile: true,
+  },
+  cors_enabled: {
+    type: "Bool",
+    label: "CORS",
+    sublabel: "Cross-origin resource sharing",
+    default: true,
+    restart_required: true,
+    root_only: true,
+    excludeFromMobile: true,
+  },
+  public_cache_maxage: {
+    type: "Integer",
+    label: "Public cache TTL (minutes)",
+    sublabel: "Cache-control max-age for public views and pages. 0 to disable",
+    default: 0,
+  },
+  files_cache_maxage: {
+    type: "Integer",
+    label: "Files cache TTL (seconds)",
+    sublabel: "Cache-control max-age for files.",
+    default: 86400,
+    excludeFromMobile: true,
+  },
+  files_direct_s3_links: {
+    type: "Bool",
+    label: "Serve files directly from S3",
+    sublabel:
+      "Return public S3 URLs instead of /files routes (requires public bucket or CDN).",
+    default: false,
+    excludeFromMobile: true,
+  },
+  cookie_duration_remember: {
+    type: "Integer",
+    label: "Cookie duration (hours) when remember ticked",
+    sublabel: "Set to 0 for expiration at the end of browser session",
+    default: 30 * 24,
+    excludeFromMobile: true,
+  },
+  cross_domain_iframe: {
+    type: "Bool",
+    label: "Cross-domain iframe",
+    restart_required: true,
+    root_only: true,
+    sublabel:
+      "Allow embedding in iframe on different domains. Unsets the X-Frame-Options header",
+    default: false,
+  },
+  storage_s3_enabled: {
+    type: "Bool",
+    label: "Use Amazon S3",
+    excludeFromSnapshot: true,
+    default: false,
+    sublabel:
+      "Use Amazon S3 (or compatible) service to store files. If disabled, Saltcorn uses local disk. WARNING: Changing this may break your uploaded files!",
+    excludeFromMobile: true,
+  },
+  storage_s3_secure: {
+    type: "Bool",
+    label: "Use Amazon S3 Secure Connection.",
+    excludeFromSnapshot: true,
+    default: true,
+    sublabel: "Connect to Amazon S3 (or compatible) securely.",
+    excludeFromMobile: true,
+  },
+  storage_s3_bucket: {
+    type: "String",
+    label: "Amazon S3 Bucket",
+    excludeFromSnapshot: true,
+    default: "",
+    blurb: "Name you selected for your S3 bucket in AWS.",
+    excludeFromMobile: true,
+  },
+  storage_s3_endpoint: {
+    type: "String",
+    label: "Amazon S3 Endpoint",
+    excludeFromSnapshot: true,
+    default: "s3.amazonaws.com",
+    blurb:
+      "Hostname of your S3 Compatible Storage provider. Defaults to 's3.amazonaws.com'.",
+    excludeFromMobile: true,
+  },
+  storage_s3_region: {
+    type: "String",
+    label: "Amazon S3 Region",
+    excludeFromSnapshot: true,
+    default: "us-east-1",
+    blurb:
+      "AWS region you selected when creating your S3 bucket. Default ti 'us-east-1'.",
+    excludeFromMobile: true,
+  },
+  storage_s3_access_key: {
+    type: "String",
+    label: "Amazon S3 Access Key ID",
+    excludeFromSnapshot: true,
+    default: "",
+    blurb:
+      "Only required if you do not want to authenticate to S3 using an IAM role. Enter the Access Key ID provided by your Amazon EC2 administrator.",
+    excludeFromMobile: true,
+  },
+  storage_s3_access_secret: {
+    type: "String",
+    input_type: "password",
+    label: "Amazon S3 Secret Access Key",
+    excludeFromSnapshot: true,
+    default: "",
+    blurb:
+      "The secret access key associated with your Amazon S3 Access Key ID.",
+    excludeFromMobile: true,
+  },
+  backup_s3_secure: {
+    type: "Bool",
+    label: "Use Amazon S3 Secure Connection.",
+    excludeFromSnapshot: true,
+    default: true,
+    sublabel: "Connect to Amazon S3 (or compatible) securely.",
+    excludeFromMobile: true,
+  },
+  backup_s3_bucket: {
+    type: "String",
+    label: "Amazon S3 Bucket",
+    excludeFromSnapshot: true,
+    default: "",
+    blurb: "Name you selected for your S3 bucket in AWS.",
+    excludeFromMobile: true,
+  },
+  backup_s3_path_prefix: {
+    type: "String",
+    label: "Amazon S3 Path Prefix",
+    excludeFromSnapshot: true,
+    default: "",
+    blurb: "Prefix you selected for your S3 bucket in AWS.",
+    excludeFromMobile: true,
+  },
+  backup_s3_endpoint: {
+    type: "String",
+    label: "Amazon S3 Endpoint",
+    excludeFromSnapshot: true,
+    default: "s3.amazonaws.com",
+    blurb:
+      "Hostname of your S3 Compatible Storage provider. Defaults to 's3.amazonaws.com'.",
+    excludeFromMobile: true,
+  },
+  backup_s3_region: {
+    type: "String",
+    label: "Amazon S3 Region",
+    excludeFromSnapshot: true,
+    default: "us-east-1",
+    blurb:
+      "AWS region you selected when creating your S3 bucket. Default ti 'us-east-1'.",
+    excludeFromMobile: true,
+  },
+  backup_s3_access_key: {
+    type: "String",
+    label: "Amazon S3 Access Key ID",
+    excludeFromSnapshot: true,
+    default: "",
+    blurb:
+      "Only required if you do not want to authenticate to S3 using an IAM role. Enter the Access Key ID provided by your Amazon EC2 administrator.",
+    excludeFromMobile: true,
+  },
+  backup_s3_access_secret: {
+    type: "String",
+    input_type: "password",
+    label: "Amazon S3 Secret Access Key",
+    excludeFromSnapshot: true,
+    default: "",
+    blurb:
+      "The secret access key associated with your Amazon S3 Access Key ID.",
+    excludeFromMobile: true,
+  },
+  backup_password: {
+    type: "String",
+    input_type: "password",
+    label: "Backup password",
+    default: "",
+    blurb: "Password to encrypt backups. Leave empty for no encryption.",
+    excludeFromMobile: true,
+  },
+  plugins_store_endpoint: {
+    type: "String",
+    input_type: "String",
+    label: "Module Store endpoint",
+    default: "https://store.saltcorn.com/api/extensions",
+    root_only: true,
+    blurb: "The endpoint of module store.",
+    excludeFromMobile: true,
+  },
+  packs_store_endpoint: {
+    type: "String",
+    input_type: "String",
+    label: "Packs Store endpoint",
+    default: "https://store.saltcorn.com/api/packs",
+    root_only: true,
+    blurb: "The endpoint of packs store.",
+    excludeFromMobile: true,
+  },
+  auto_backup_frequency: {
+    type: "String",
+    label: "Auto backup frequency",
+    excludeFromSnapshot: true,
+    default: "Never",
+    excludeFromMobile: true,
+  },
+  auto_backup_destination: {
+    type: "String",
+    excludeFromSnapshot: true,
+    label: "Auto backup Destination",
+    default: "Saltcorn files",
+    excludeFromMobile: true,
+  },
+  auto_backup_directory: {
+    type: "String",
+    excludeFromSnapshot: true,
+    label: "Auto backup directory",
+    default: "",
+    excludeFromMobile: true,
+  },
+  auto_backup_retain_local_directory: {
+    type: "String",
+    excludeFromSnapshot: true,
+    label: "Retain auto backup local directory",
+    default: "",
+    excludeFromMobile: true,
+  },
+  auto_backup_server: {
+    type: "String",
+    excludeFromSnapshot: true,
+    label: "Auto backup server",
+    default: "",
+    excludeFromMobile: true,
+  },
+  auto_backup_username: {
+    type: "String",
+    excludeFromSnapshot: true,
+    label: "Auto backup username",
+    default: "",
+    excludeFromMobile: true,
+  },
+  auto_backup_password: {
+    type: "String",
+    excludeFromSnapshot: true,
+    label: "Auto backup password",
+    default: "",
+    excludeFromMobile: true,
+  },
+  auto_backup_port: {
+    type: "Integer",
+    excludeFromSnapshot: true,
+    label: "Auto backup port",
+    default: 22,
+    excludeFromMobile: true,
+  },
+  auto_backup_tenants: {
+    type: "Bool",
+    excludeFromSnapshot: true,
+    label: "Auto backup tenants",
+    default: false,
+    root_only: true,
+    excludeFromMobile: true,
+  },
+  auto_backup_expire_days: {
+    type: "Integer",
+    excludeFromSnapshot: true,
+    label: "Auto backup expiration days",
+    default: null,
+    root_only: true,
+    excludeFromMobile: true,
+  },
+  auto_backup_retention_mode: {
+    type: "String",
+    excludeFromSnapshot: true,
+    label: "Auto backup retention mode",
+    default: "Expiration",
+    root_only: true,
+    excludeFromMobile: true,
+  },
+  auto_backup_keep_daily: {
+    type: "Integer",
+    excludeFromSnapshot: true,
+    label: "Auto backup keep daily",
+    default: 7,
+    root_only: true,
+    excludeFromMobile: true,
+  },
+  auto_backup_keep_weekly: {
+    type: "Integer",
+    excludeFromSnapshot: true,
+    label: "Auto backup keep weekly",
+    default: 4,
+    root_only: true,
+    excludeFromMobile: true,
+  },
+  auto_backup_keep_monthly: {
+    type: "Integer",
+    excludeFromSnapshot: true,
+    label: "Auto backup keep monthly",
+    default: 12,
+    root_only: true,
+    excludeFromMobile: true,
+  },
+  auto_backup_keep_yearly: {
+    type: "Integer",
+    excludeFromSnapshot: true,
+    label: "Auto backup keep yearly",
+    default: 3,
+    root_only: true,
+    excludeFromMobile: true,
+  },
+  auto_backup_keep_min: {
+    type: "Integer",
+    excludeFromSnapshot: true,
+    label: "Auto backup minimum kept",
+    default: 3,
+    root_only: true,
+    excludeFromMobile: true,
+  },
+  backup_with_event_log: {
+    type: "Bool",
+    label: "Backup with event log",
+    default: false,
+    excludeFromMobile: true,
+  },
+  snapshots_enabled: {
+    type: "Bool",
+    label: "Snapshots enabled",
+    default: false,
+  },
+  notification_in_menu: {
+    type: "Bool",
+    label: "In user menu",
+    sublabel: "Show notifications in the user menu",
+    default: false,
+  },
+  pwa_enabled: {
+    type: "Bool",
+    label: "Enabled",
+    sublabel: "Progressive Web Application enabled",
+    default: false,
+  },
+  pwa_display: {
+    input_type: "select",
+    label: "Display",
+    default: "browser",
+    options: ["browser", "fullscreen", "standalone", "minimal-ui"],
+  },
+  pwa_set_colors: {
+    type: "Bool",
+    label: "Set colors",
+    default: false,
+  },
+  pwa_theme_color: {
+    type: "Color",
+    label: "Theme color",
+  },
+  pwa_background_color: {
+    type: "Color",
+    label: "Background color",
+  },
+  pwa_icons: {
+    type: "Repeat",
+    label: "Icons",
+    fields: [
+      {
+        type: "File",
+        name: "image",
+        label: "Image",
+        default: 0,
+        attributes: {
+          select_file_where: { min_role_read: 100, mime_super: "image" },
+        },
+        sublabel: "Select a publicly accessible square image file",
+      },
+      {
+        type: "Integer",
+        label: "Size",
+        name: "size",
+        sublabel: "Height and width in px",
+      },
+      {
+        type: "Bool",
+        label: "Maskable",
+        name: "maskable",
+      },
+    ],
+  },
+  enable_push_notify: {
+    type: "Bool",
+    label: "Enabled",
+    default: false,
+    sublabel: "Push Notifications enabled",
+  },
+  log_level: {
+    input_type: "select",
+    label: "System logging verbosity",
+    default: "2",
+
+    excludeFromSnapshot: true,
+    options: [
+      { label: "None: Silent", value: "0" },
+      { label: "Few: Crashes", value: "1" },
+      { label: "Some: Crashes, handled errors, warnings", value: "2" },
+      { label: "Many: All errors, pageloads", value: "3" },
+      {
+        label: "Most: All Errors, pageloads, triggers, scheduler ticks",
+        value: "4",
+      },
+      {
+        label:
+          "All: All Errors, pageloads, triggers, scheduler ticks, events, state refreshes",
+        value: "5",
+      },
+      {
+        label: "Silly: Additional debug logging",
+        value: "6",
+      },
+    ],
+  },
+  log_ip_address: {
+    type: "Bool",
+    label: "Log IP address",
+    sublabel: "Record the request IP address in log messages",
+    default: false,
+    excludeFromMobile: true,
+  },
+  bom_csv_download: {
+    type: "Bool",
+    label: "CSV BOM",
+    sublabel: "Include the Byte-Order Mark in downloaded CSV files",
+    default: false,
+    excludeFromMobile: true,
+  },
+  localize_csv_download: {
+    type: "Bool",
+    label: "Localize CSV downloads",
+    default: false,
+    excludeFromMobile: true,
+  },
+
+  file_accept_filter_default: {
+    type: "String",
+    label: "Default File accept filter",
+    default: null,
+
+    blurb:
+      "Specifies a default filter for what file types the user can pick from the file input dialog box. " +
+      "Example is `.doc, text/csv,audio/*,video/*,image/*`",
+  },
+  csv_types_detection_rows: {
+    type: "Integer",
+    label: "CSV types detection rows",
+    default: 500,
+    blurb:
+      "Specifies how many rows from start of CSV file will be using to determine types in created tables. " +
+      "Default is 500",
+  },
+  csv_bool_values: {
+    type: "String",
+    label: "CSV bool values",
+    default: "true false yes no on off y n t f",
+    blurb:
+      "Allows to redefine list of values that recognized as bool values in cvs file",
+  },
+  file_upload_debug: {
+    type: "Bool",
+    label: "File upload debug",
+    default: false,
+    blurb: "Turn on to debug file upload in express-fileupload.",
+    excludeFromMobile: true,
+  },
+  file_upload_timeout: {
+    type: "Integer",
+    label: "File upload timeout",
+    default: 0,
+    blurb:
+      "Defines how long to wait for data before aborting file upload. " +
+      "Set to 0 if you want to turn off timeout checks. ",
+    excludeFromMobile: true,
+  },
+  file_upload_limit: {
+    type: "Integer",
+    label: "Upload size limit (Kb)",
+    blurb: "Maximum upload file size in kilobytes",
+    excludeFromMobile: true,
+  },
+  file_serve_html: {
+    type: "Bool",
+    label: "Serve HTML files",
+    default: false,
+    blurb:
+      "Unsafe. HTML files will be rendered in browser instead of as plaintext. Use Page with HTML file setting to safely serve specific HTML files",
+    excludeFromMobile: true,
+  },
+  body_limit: {
+    type: "Integer",
+    label: "Body size limit (Kb)",
+    root_only: true,
+    blurb: "Maximum request body size in kilobytes",
+    excludeFromMobile: true,
+  },
+  url_encoded_limit: {
+    type: "Integer",
+    root_only: true,
+    label: "URL encoded size limit (Kb)",
+    blurb: "Maximum URL encoded request size in kilobytes",
+    excludeFromMobile: true,
+  },
+  min_role_inspect_tables: {
+    type: "Role",
+    label: "Inspect tables",
+    default: 1,
+    required: true,
+    blurb: "Minimum role to inspect (see, without editing) tables",
+    excludeFromMobile: true,
+  },
+  min_role_edit_tables: {
+    type: "Role",
+    label: "Edit tables",
+    default: 1,
+    required: true,
+    blurb: "Minimum role to edit tables",
+    excludeFromMobile: true,
+  },
+  min_role_edit_views: {
+    type: "Role",
+    label: "Edit views",
+    default: 1,
+    required: true,
+    blurb: "Minimum role to edit views",
+    excludeFromMobile: true,
+  },
+  min_role_edit_pages: {
+    type: "Role",
+    label: "Edit pages",
+    default: 1,
+    required: true,
+    blurb: "Minimum role to edit pages",
+    excludeFromMobile: true,
+  },
+  min_role_edit_triggers: {
+    type: "Role",
+    label: "Edit triggers",
+    default: 1,
+    required: true,
+    blurb: "Minimum role to edit triggers",
+    excludeFromMobile: true,
+  },
+  min_role_edit_menu: {
+    type: "Role",
+    label: "Edit menu",
+    default: 1,
+    required: true,
+    blurb: "Minimum role to edit menu",
+    excludeFromMobile: true,
+  },
+  min_role_edit_files: {
+    type: "Role",
+    label: "Edit files",
+    default: 1,
+    required: true,
+    blurb: "Minimum role to edit files",
+    excludeFromMobile: true,
+  },
+  min_role_edit_search: {
+    type: "Role",
+    label: "Edit search",
+    default: 1,
+    required: true,
+    blurb: "Minimum role to edit search",
+    excludeFromMobile: true,
+  },
+  min_role_create_snapshots: {
+    type: "Role",
+    label: "Create snapshot",
+    default: 1,
+    required: true,
+    blurb: "Minimum role to create snapshot",
+    excludeFromMobile: true,
+  },
+  min_role_edit_users: {
+    type: "Role",
+    label: "Edit users",
+    default: 1,
+    required: true,
+    blurb: "Minimum role to access the user editing interface",
+    excludeFromMobile: true,
+  },
+  min_role_search: {
+    type: "Role",
+    label: "Role for search",
+    default: 100, // public is default
+    required: true,
+    blurb: "Minimum role to access search page",
+  },
+  search_page_size: {
+    type: "Integer",
+    label: "Search page size",
+    default: 20,
+    blurb: "Search page pagination size",
+  },
+  search_table_description: {
+    type: "Bool",
+    label: "Use table description instead of name as header",
+    default: 20,
+  },
+  search_results_decoration: {
+    label: "Search results decoration",
+    blurb: "Show results from each table in this type of element",
+    input_type: "select",
+    options: ["Cards", "Tabs"],
+  },
+  search_use_websearch: {
+    label: "Use websearch for full text search",
+    type: "Bool",
+    default: false,
+  },
+  search_disable_fts: {
+    label: "Disable full-text search",
+    type: "Bool",
+    default: false,
+  },
+  backup_file_prefix: {
+    type: "String",
+    label: "Backup file prefix",
+    default: "sc-backup-",
+    excludeFromMobile: true,
+  },
+  backup_history: {
+    type: "Bool",
+    label: "Include table history in backup",
+    default: true,
+    excludeFromMobile: true,
+  },
+  backup_exclude_file_globs: {
+    type: "String",
+    label: "Exclude files from backup",
+    default: "",
+    blurb:
+      "Comma separated globs. Files whose name or path matches any of these are not included in the backup.",
+    excludeFromMobile: true,
+  },
+  restore_history: {
+    type: "Bool",
+    label: "Restore history tables",
+    default: true,
+    excludeFromMobile: true,
+  },
+  max_relations_layer_depth: {
+    type: "Integer",
+    label: "Max relations layer depth",
+    default: 6,
+    excludeFromMobile: true,
+  },
+  missing_screen_info_strategy: {
+    type: "String",
+    label:
+      "how to handle a Pagegroup load when the browser sends no screen info Cookie",
+    default: "guess_from_user_agent",
+  },
+  user_agent_screen_infos: {
+    type: "JSON",
+    label: "screen infos mapped to the user agent device",
+    default: {
+      web: {
+        width: 1920,
+        height: 1000,
+        innerWidth: 1848,
+        innerHeight: 980,
+      },
+    },
+  },
+  joined_log_socket_ids: {
+    type: "hidden",
+    label: "Joined log socket ids",
+    default: [],
+    excludeFromMobile: true,
+    ephemeral: true,
+  },
+  joined_real_time_socket_ids: {
+    type: "hidden",
+    label: "Joined real time socket ids",
+    default: [],
+    excludeFromMobile: true,
+    ephemeral: true,
+  },
+  joined_dynamic_update_socket_ids: {
+    type: "hidden",
+    label: "Joined dynamic update socket ids",
+    default: [],
+    excludeFromMobile: true,
+    ephemeral: true,
+  },
+  prune_session_interval: {
+    type: "Integer",
+    label: "Prune session interval (seconds)",
+    default: 900,
+    blurb:
+      "Interval in seconds to check for expred sessions in the postgres db. " +
+      "0, empty or a negative number to disable",
+    root_only: true,
+    restart_required: true,
+    excludeFromMobile: true,
+  },
+  engines_cache: {
+    type: "JSON",
+    label: "Cached plugin version infos",
+    default: {},
+    excludeFromMobile: true,
+  },
+  delete_finished_workflows_days: {
+    type: "Integer",
+    label: "Delete finished workflows after days",
+  },
+  delete_error_workflows_days: {
+    type: "Integer",
+    label: "Delete error workflows after days",
+  },
+  delete_waiting_workflows_days: {
+    type: "Integer",
+    label: "Delete error workflows after days",
+  },
+  delete_running_workflows_days: {
+    type: "Integer",
+    label: "Delete error workflows after days",
+  },
+  maintenance_mode_enabled: {
+    type: "Bool",
+    label: "Enable maintenance mode",
+    default: false,
+    blurb: "Enable maintenance mode to restrict access to non-admin users",
+  },
+  maintenance_mode_page: {
+    type: "Page",
+    label: "Maintenance mode page",
+    default: "",
+    blurb: "Select the page to display during maintenance mode",
+  },
+  viewgen_naming_convention: {
+    type: "String",
+    label: "Naming convention",
+    default: "{{viewpattern}} {{tablename}}",
+    blurb: "",
+    excludeFromMobile: true,
+  },
+  viewgen_template_table: {
+    type: "String",
+    label: "Template table",
+    excludeFromMobile: true,
+  },
+  vapid_public_key: {
+    type: "String",
+    label: "VAPID public key",
+    default: "",
+    blurb: "Public key for VAPID authentication in web push notifications",
+    excludeFromMobile: true,
+    helpTopic: "VAPID configuration",
+  },
+  vapid_private_key: {
+    type: "String",
+    label: "VAPID private key",
+    default: "",
+    blurb: "Private key for VAPID authentication in web push notifications",
+    input_type: "password",
+    excludeFromMobile: true,
+  },
+  vapid_email: {
+    type: "String",
+    label: "VAPID email",
+    default: "",
+    blurb:
+      "Email address for VAPID authentication in web push notifications. " +
+      "Usually, it is your email address.",
+    excludeFromMobile: true,
+  },
+  firebase_json_key: {
+    type: "File",
+    name: "firebase_json_key",
+    label: "Firebase JSON key",
+    default: null,
+    attributes: {
+      select_file_where: {
+        min_role_read: 100,
+        mime_super: "application",
+        folder: "/mobile-app-configurations",
+      },
+    },
+    sublabel:
+      "This is a private key file for your Firebase project. " +
+      "Your Saltcorn server uses it to send push notifications or push-based synchronizations to your Android mobile app. " +
+      "Upload it to the '/mobile-app-configurations' directory (if it does not exist, create it). " +
+      "You can configure it here or in the 'Mobile app' Menu.",
+    helpTopic: "Firebase Configurations",
+  },
+  firebase_app_services: {
+    type: "File",
+    name: "firebase_app_services",
+    label: "Firebase app services",
+    default: null,
+    attributes: {
+      select_file_where: {
+        min_role_read: 100,
+        mime_super: "application",
+        folder: "/mobile-app-configurations",
+      },
+    },
+    sublabel:
+      "This is a configuration file specific to your mobile app. " +
+      "It contains, among other things, your App ID, the Firebase project ID, and an API key. " +
+      "The file gets bundled into the client and will be used to subscribe to push notifications or push-based synchronizations from the server. " +
+      "Upload it to the '/mobile-app-configurations' directory (if it does not exist, create it). " +
+      "You can configure it here or in the 'Mobile app' Menu.",
+    helpTopic: "Firebase Configurations",
+  },
+  apn_signing_key: {
+    type: "File",
+    name: "apn_signing_key",
+    label: "APN signing key",
+    default: null,
+    attributes: {
+      select_file_where: {
+        min_role_read: 100,
+        mime_super: "application",
+        folder: "/mobile-app-configurations",
+      },
+    },
+    sublabel:
+      "This is the private key file for your Apple Push Notification service (APNs). " +
+      "Your Saltcorn server uses it to send push notifications or push-based synchronizations to your iOS mobile app. " +
+      "Upload it to the '/mobile-app-configurations' directory (if it does not exist, create it). " +
+      "You can configure it here or in the 'Mobile app' Menu.",
+    helpTopic: "APN Configurations",
+  },
+  apn_signing_key_id: {
+    type: "String",
+    label: "APN signing key ID",
+    default: "",
+    blurb:
+      "The Key ID obtained from your Apple Developer account for the APN signing key. " +
+      "You can configure it here or in the 'Mobile app' Menu.",
+    helpTopic: "APN Configurations",
+    excludeFromMobile: true,
+  },
+  push_notification_icon: {
+    type: "File",
+    name: "push_notification_icon",
+    label: "Push icon",
+    default: undefined,
+    attributes: {
+      select_file_where: { min_role_read: 100, mime_super: "image" },
+    },
+    sublabel: "Select a publicly accessible square image file",
+  },
+  push_notification_badge: {
+    type: "File",
+    name: "push_notification_badge",
+    label: "Push badge",
+    default: undefined,
+    attributes: {
+      select_file_where: { min_role_read: 100, mime_super: "image" },
+    },
+    sublabel:
+      "Select a publicly accessible monochrome square image file (prefarbly 72x72px)",
+  },
+  push_notification_subscriptions: {
+    type: "hidden",
+    label: "Notify subscriptions",
+    default: {},
+    excludeFromMobile: true,
+  },
+  push_sync_subscriptions: {
+    type: "hidden",
+    label: "Push sync subscriptions",
+    default: {},
+    excludeFromMobile: true,
+  },
+  mobile_emit_allowed_events: {
+    type: "String[]",
+    label: "Mobile app: allowed emit events",
+    default: [],
+    blurb:
+      "Additional event types that authenticated mobile app users may emit via POST /api/emit-event. " +
+      "ReceiveMobileShareData is always allowed.",
+    excludeFromMobile: true,
+  },
+  mobile_emit_public_events: {
+    type: "String[]",
+    label: "Mobile app: public emit events",
+    default: [],
+    blurb:
+      "Unauthenticated (public) mobile app users may emit these event types to the server " +
+      "via POST /api/emit-event. Empty by default — no events can be emitted without login.",
+    excludeFromMobile: true,
+  },
+  mail_throttle_per_user: {
+    type: "Integer",
+    label: "Throttle time per user",
+    default: 30,
+    blurb:
+      "Interval in seconds to wait before sending another email to the same user. " +
+      "Set to 0 to disable throttling.",
+    excludeFromMobile: true,
+  },
+  pre_installed_module_infos: {
+    type: "JSON",
+    label: "Pre-installed module infos",
+    default: [],
+    excludeFromMobile: true,
+  },
+  enable_rls: {
+    type: "Bool",
+    label: "Enable Row Level Security",
+    default: true,
+    blurb:
+      "Enable PostgreSQL Row Level Security for tables with ownership configured. Requires PostgreSQL.",
+  },
+};
+// TODO move list of languages from code to configuration
+const available_languages = {
+  en: "English",
+  fr: "Français",
+  de: "Deutsch",
+  da: "Dansk",
+  es: "Español",
+  no: "Norsk",
+  sv: "Svenska",
+  hi: "हिन्दी",
+  ru: "Русский",
+  nl: "Nederlands",
+  pt: "Português",
+  ar: "العربية",
+  it: "Italiano",
+  zh: "中文",
+  pl: "Polski",
+  uk: "Українська",
+  si: "Sinhala",
+  el: "ελληνικά",
+  th: "แบบไทย",
+  bn: "বাংলা",
+  cs: "Český",
+  et: "eesti",
+  fil: "Pilipino",
+  id: "Indonesia",
+  ja: "日本語",
+  ko: "한국어",
+  lv: "Latviešu",
+  lt: "Lietuvių",
+  ne: "नेपाली",
+  ro: "română",
+  sr: "Српски",
+  sk: "slovenský",
+  sl: "slovenščina",
+  tr: "Türkçe",
+  ur: "اردو",
+  vt: "tiếng Việt",
+};
+/**
+ * Get Config variable value by key (contract)
+ * @function
+ * @param {string} key
+ * @param {object|undefined} def
+ * @returns {Promise<object>}
+ */
+const getConfig = async (key: string, def?: any): Promise<any> => {
+  const cfg = await db.selectMaybeOne("_sc_config", { key });
+  if (cfg && typeof cfg.value === "string") return JSON.parse(cfg.value).v;
+  else if (cfg) return cfg.value.v;
+  else if (def) return def;
+  else return configTypes[key] ? configTypes[key].default : undefined;
+};
+
+/**
+ * Get all config variables list
+ * @function
+ * @returns {Promise<object>}
+ */
+const getAllConfig = async (): Promise<ConfigTypes> => {
+  const cfgs = await db.select("_sc_config");
+  let cfg: ConfigTypes = {};
+  cfgs.forEach(({ key, value }: { key: string; value: string | any }) => {
+    if (key === "testMigration" || configTypes[key]?.ephemeral)
+      //legacy invalid cfg
+      return;
+
+    try {
+      cfg[key] = typeof value === "string" ? JSON.parse(value).v : value.v;
+    } catch (e: any) {
+      console.error(
+        "config parsing error",
+        e,
+        { key, value },
+        db.getTenantSchema()
+      );
+    }
+  });
+  return cfg;
+};
+
+/**
+ * Set config variable value by key
+ * @function
+ * @param {string} key
+ * @param {object} value
+ * @returns {Promise<void>}
+ */
+const setConfig = async (key: string, value: any): Promise<void> => {
+  if (db.isSQLite && !isNode()) {
+    // mobile/capacitor sqlite binding - distinct from the node @saltcorn/sqlite
+    // driver, which (like postgres/mysql) goes through db.upsert_config below
+    await db.query(
+      `insert into ${db.getTenantSchemaPrefix()}_sc_config(key, value) values(?1, json(?2))
+                    on conflict (key) do update set value = json(?2)`,
+      [key, JSON.stringify({ v: value })]
+    );
+  } else await db.upsert_config(key, value);
+  if (configTypes[key] && configTypes[key].onChange)
+    await configTypes[key].onChange(value);
+};
+
+/**
+ * Delete config variable
+ * @function
+ * @param {string} key
+ * @returns {Promise<void>}
+ */
+const deleteConfig = async (key: string): Promise<void> => {
+  await db.deleteWhere("_sc_config", { key });
+};
+
+type RemoveFromMenuOpts = {
+  name: string;
+  type: "View" | "Page";
+};
+
+/**
+ * Remove from menu
+ * @function
+ * @param {object} item
+ * @returns {Promise<void>}
+ */
+const remove_from_menu = async (item: RemoveFromMenuOpts): Promise<void> => {
+  const current_menu = getState()!.getConfigCopy("menu_items", []);
+  const new_menu = current_menu.filter(
+    (menuitem: any) =>
+      !(
+        item.type === menuitem.type &&
+        (item.type === "View"
+          ? menuitem.viewname === item.name
+          : menuitem.pagename === item.name)
+      )
+  );
+  await save_menu_items(new_menu);
+};
+
+const isBlank = (s: any) => typeof s !== "string" || !s.trim();
+
+/**
+ * Expand a Dynamic menu item into the menu items it stands for, one per row.
+ * Throws InvalidConfiguration if the item is not usable.
+ */
+const unroll_dynamic_menu_item = async (item: any): Promise<any[]> => {
+  const Table = (await import("./table.js")).default;
+  if (isBlank(item.dyn_table))
+    throw new InvalidConfiguration("Dynamic menu item: Table is required");
+  if (isBlank(item.dyn_label_fml))
+    throw new InvalidConfiguration(
+      "Dynamic menu item: Label formula is required"
+    );
+  if (isBlank(item.dyn_url_fml))
+    throw new InvalidConfiguration("Dynamic menu item: URL formula is required");
+  const table = Table.findOne({ name: item.dyn_table });
+  if (!table)
+    throw new InvalidConfiguration(
+      `Dynamic menu item: Unable to find table ${item.dyn_table}`
+    );
+  const fields = table.getFields();
+  const compile = (fml: string, what: string) => {
+    try {
+      return get_expression_function(fml, fields);
+    } catch (e: any) {
+      throw new InvalidConfiguration(
+        `Dynamic menu item: ${what} formula error: ${e.message}`
+      );
+    }
+  };
+  const fLabel = compile(item.dyn_label_fml, "Label");
+  const fTooltip = isBlank(item.dyn_tooltip_fml)
+    ? undefined
+    : compile(item.dyn_tooltip_fml, "Tooltip");
+  const fUrl = compile(item.dyn_url_fml, "URL");
+  let where;
+  try {
+    where = isBlank(item.dyn_include_fml)
+      ? {}
+      : jsexprToWhere(item.dyn_include_fml);
+  } catch (e: any) {
+    throw new InvalidConfiguration(
+      `Dynamic menu item: Include formula error: ${e.message}`
+    );
+  }
+  const selopts = item.dyn_order
+    ? { orderBy: db.sqlsanitize(item.dyn_order) }
+    : {};
+  const rows = await table.getRows(where, selopts);
+  const toLink = (row: any) => ({
+    ...item,
+    label: fLabel(row),
+    tooltip: fTooltip ? fTooltip(row) : undefined,
+    url: fUrl(row),
+    type: "Link",
+  });
+  if (item.dyn_section_field) {
+    const section_field = fields.find(
+      (f) => f.name === item.dyn_section_field
+    );
+    if (!section_field) {
+      throw new InvalidConfiguration(
+        `Dynamic menu section field ${item.dyn_section_field} not found`
+      );
+    }
+    const sections = section_field.attributes.options
+      .split(",")
+      .map((s: string) => s.trim());
+    return sections.map((section: string) => ({
+      ...item,
+      label: section,
+      type: "Header",
+      subitems: rows
+        .filter((r) => r[item.dyn_section_field] === section)
+        .map(toLink),
+    }));
+  }
+  return rows.map(toLink);
+};
+
+/**
+ * Unroll the menu (Dynamic items expanded). A broken Dynamic item is left out
+ * and its error message passed to onError.
+ */
+const unroll_menu_items = async (
+  items: any[],
+  onError: (msg: string) => void
+): Promise<any[]> => {
+  const unrolled_menu_items = [];
+  for (const item of items) {
+    if (item.type === "Dynamic") {
+      try {
+        unrolled_menu_items.push(...(await unroll_dynamic_menu_item(item)));
+      } catch (e: any) {
+        onError(e?.message || String(e));
+      }
+    } else if (item.subitems && item.subitems.length > 0) {
+      const subitems = await unroll_menu_items(item.subitems, onError);
+      unrolled_menu_items.push({ ...item, subitems });
+    } else unrolled_menu_items.push(item);
+  }
+  return unrolled_menu_items;
+};
+
+/**
+ * Check the menu without saving it.
+ * @param menu_items
+ * @returns error messages, one per broken Dynamic item; empty if all valid
+ */
+const menu_items_errors = async (menu_items: any[]): Promise<string[]> => {
+  const errors: string[] = [];
+  await unroll_menu_items(menu_items, (msg) => errors.push(msg));
+  return errors;
+};
+
+/**
+ * Save the menu and its unrolled form (Dynamic items expanded).
+ * A broken Dynamic item is logged and left out of the unrolled menu, so that
+ * unrelated menu changes (e.g. deleting a view) are not blocked by it.
+ * Use menu_items_errors to reject invalid menus before saving.
+ * @param menu_items
+ */
+const save_menu_items = async (menu_items: any[]): Promise<void> => {
+  const unrolled = await unroll_menu_items(menu_items, (msg) =>
+    getState()!.log(2, `Skipping broken dynamic menu item: ${msg}`)
+  );
+  await getState()!.setConfig("menu_items", menu_items);
+  await getState()!.setConfig("unrolled_menu_items", unrolled);
+};
+
+// For now latestVersion() ignores the supported version
+// Do we have to move this into server, so that it can access the stable_versioning utils?
+/**
+ * Get latest npm version
+ * @param {string} pkg
+ * @returns {Promise<string>}
+ */
+// Overridable so that a mirror - or a test serving a fake registry on
+// loopback - can be used instead of the public npm registry
+const npm_registry_url = (pkg: string) =>
+  `${process.env.SALTCORN_NPM_REGISTRY || "https://registry.npmjs.org"}/${pkg}`;
+
+const get_latest_npm_version = async (
+  pkg: string,
+  timeout_ms?: number
+): Promise<string> => {
+  const { isStale } = await import("../utils.js");
+  const stored = getState()!.getConfig("latest_npm_version", {});
+  const airgap = getState()!.getConfig("airgap", false);
+
+  if (stored[pkg] && (!isStale(stored[pkg].time, 6) || airgap)) {
+    return stored[pkg].version;
+  }
+  if (airgap) return "";
+
+  const guess = stored[pkg]?.version || ""; //default return
+  try {
+    const fetch_it = async () => {
+      const response = await fetch(npm_registry_url(pkg));
+      if (!response.ok) {
+        throw new Error(`Failed to fetch data: ${response.statusText}`);
+      }
+      const data = await response.json();
+      if (!data?.versions || data.versions.length === 0)
+        throw new Error("No versions found");
+      // the last published version may be a prerelease (e.g. 1.7.0-beta.2),
+      // so prefer the registry's "latest" dist-tag, which is what
+      // `npm install pkg@latest` installs
+      const keys = Object.keys(data.versions);
+      const latest = data["dist-tags"]?.latest || keys[keys.length - 1];
+      const stored1 = getState()!.getConfigCopy("latest_npm_version", {});
+      await getState()!.setConfig("latest_npm_version", {
+        ...stored1,
+        [pkg]: { time: new Date(), version: latest },
+      });
+      return latest;
+    };
+
+    if (timeout_ms) {
+      const canceller = async () => {
+        await sleep(timeout_ms);
+        return guess;
+      };
+      return Promise.race([fetch_it().catch((e) => guess), canceller()]).catch(
+        (e) => guess
+      );
+    } else return await fetch_it();
+  } catch (e) {
+    return guess;
+  }
+};
+
+const get_saltcorn_npm_versions = async (
+  timeout_ms?: number
+): Promise<string[]> => {
+  const { isStale } = await import("../utils.js");
+  const pkg = "@saltcorn/cli";
+  const stored = getState()!.getConfig("saltcorn_npm_versions", {});
+  const airgap = getState()!.getConfig("airgap", false);
+
+  if (stored?.time && (!isStale(stored.time, 6) || airgap)) {
+    return stored?.versions;
+  }
+  if (airgap) return [];
+
+  const guess: string[] = stored?.versions || []; //default return
+  try {
+    const fetch_it = async () => {
+      const response = await fetch(npm_registry_url(pkg));
+      if (!response.ok) {
+        throw new Error(`Failed to fetch data: ${response.statusText}`);
+      }
+      const data = await response.json();
+      if (!data?.versions || data.versions.length === 0)
+        throw new Error("No versions found");
+      const keys = Object.keys(data.versions);
+      await getState()!.setConfig("saltcorn_npm_versions", {
+        time: new Date(),
+        versions: keys,
+      });
+      return keys;
+    };
+
+    if (timeout_ms) {
+      const canceller = async () => {
+        await sleep(timeout_ms);
+        return guess;
+      };
+      return Promise.race([fetch_it().catch((e) => guess), canceller()]).catch(
+        (e) => guess
+      );
+    } else return await fetch_it();
+  } catch (e) {
+    return guess;
+  }
+};
+
+/**
+ * Get base url
+ * @param {object} req
+ * @returns {string}
+ */
+const get_base_url = (req?: Req): string => {
+  const cfg = getState()!.getConfig("base_url", "");
+  if (cfg) return ensure_final_slash(cfg);
+  if (!req || !req.get) return "/";
+  let ports = "";
+  const host = req.get("host");
+  if (typeof host === "string") {
+    const hosts = host.split(":");
+    if (hosts.length > 1) ports = `:${hosts[1]}`;
+  }
+  return `${req.protocol}://${req.hostname}${ports}/`;
+};
+
+/**
+ * Check email mask
+ * @function
+ * @param {string} email
+ * @returns {boolean}
+ */
+const check_email_mask = (email: string): boolean => {
+  const cfg = getState()!.getConfig("email_mask", "");
+  if (cfg) {
+    return email.endsWith(cfg);
+  } else return true;
+};
+
+/**
+ * Set multitenancy cfg flag
+ * @function
+ * @param {boolean} val
+ * @returns {void}
+ */
+const set_multitenancy_cfg = (val: boolean): void => {
+  const isRoot = db.getTenantSchema() === db.connectObj.default_schema;
+  if (!isRoot) return;
+  const cfg = getConfigFile();
+  cfg.multi_tenant = val;
+  console.log("writing config.multi_tenant to", val);
+  writeFileSync(configFilePath, JSON.stringify(cfg, null, 2));
+};
+
+export {
+  getConfig,
+  getAllConfig,
+  setConfig,
+  deleteConfig,
+  configTypes,
+  remove_from_menu,
+  available_languages,
+  get_latest_npm_version,
+  get_saltcorn_npm_versions,
+  get_base_url,
+  save_menu_items,
+  menu_items_errors,
+  check_email_mask,
+};
+
+namespace configExports {
+  export type SingleConfig = Record<string, any>;
+  export type ConfigTypes = Record<string, SingleConfig>;
+}
+export type SingleConfig = configExports.SingleConfig;
+export type ConfigTypes = configExports.ConfigTypes;

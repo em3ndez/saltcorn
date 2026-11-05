@@ -1,0 +1,1998 @@
+import db from "@saltcorn/data/db/index";
+import utils = require("@saltcorn/data/utils");
+const { getSafeSaltcornCmd } = utils;
+import { join, parse, relative, sep } from "path";
+import {
+  existsSync,
+  mkdirSync,
+  copySync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "fs-extra";
+import fs from "fs";
+import { Row } from "@saltcorn/db-common/internal";
+import { spawnSync } from "child_process";
+import Page from "@saltcorn/data/models/page";
+import File from "@saltcorn/data/models/file";
+import type User from "@saltcorn/data/models/user";
+import { getState } from "@saltcorn/data/db/state";
+import type { PluginLayout, RunExtra } from "@saltcorn/types/base_types";
+import { parseStringPromise, Builder } from "xml2js";
+import { available_languages } from "@saltcorn/data/models/config";
+import type { IosCfg } from "../mobile-builder";
+import { ReqRes } from "@saltcorn/types/common_types";
+import { CapacitorPlugin } from "@saltcorn/types/base_types";
+import { ZipBuilder } from "@saltcorn/admin-models/models/zip";
+import { extractZip } from "@saltcorn/admin-models/models/zip-extract";
+const resizer = require("resize-with-sharp-or-jimp");
+
+/**
+ * Copies the template into buildDir and installs base build tooling (no Capacitor deps).
+ * @param buildDir directory where the app will be build
+ * @param templateDir directory of the template code to copy
+ */
+export function prepareBuildDirBase(buildDir: string, templateDir: string) {
+  if (existsSync(buildDir)) rmSync(buildDir, { force: true, recursive: true });
+  copySync(templateDir, buildDir);
+  rmSync(`${buildDir}/node_modules`, { recursive: true, force: true });
+  const result = spawnSync("npm", ["install"], {
+    cwd: buildDir,
+  });
+  console.log(result.output.toString());
+}
+
+/**
+ * Installs Capacitor/native/Cordova deps - build-machine only, not the remote server.
+ * @param buildDir prepareBuildDirBase'd build directory
+ * @param pushEnabled include push-notification native deps
+ * @param backgroundFetchEnabled include background-fetch native deps
+ * @param pushSyncEnabled include push-sync native deps
+ * @param includeNativeBuildTools install CLI/asset/Cordova tools too - false for a remote bundle
+ */
+export function installCapacitorDeps(
+  buildDir: string,
+  pushEnabled: boolean,
+  backgroundFetchEnabled: boolean,
+  pushSyncEnabled: boolean,
+  includeNativeBuildTools: boolean = true
+) {
+  const state = getState();
+  if (!state) throw new Error("Unable to get the state object");
+
+  // cap-plugins needed for saltcorn-plugins
+  const additionalPlugins = state.capacitorPlugins.map(
+    (plugin: CapacitorPlugin) => `${plugin.name}@${plugin.version}`
+  );
+
+  console.log("installing capacitor deps and plugins");
+  const capDepsAndPlugins = [
+    ...(includeNativeBuildTools
+      ? [
+          "@capacitor/cli@7.4.5",
+          "@capacitor/assets@3.0.5",
+          "@capacitor-community/sqlite@7.0.3",
+        ]
+      : []),
+    "@capacitor/core@7.4.5",
+    "@capacitor/filesystem@7.1.6",
+    "@capacitor/file-transfer@1.0.12",
+    "@capacitor/camera@7.0.3",
+    "@capacitor/network@7.0.3",
+    "@capacitor/screen-orientation@7.0.3",
+    "@capacitor/app@7.1.0",
+    "send-intent@7.0.0",
+    ...additionalPlugins,
+    ...(pushEnabled || pushSyncEnabled
+      ? ["@capacitor/device@7.0.2", "@capacitor/push-notifications@7.0.3"]
+      : []),
+    ...(backgroundFetchEnabled
+      ? ["@transistorsoft/capacitor-background-fetch@7.1.0"]
+      : []),
+    ...(pushSyncEnabled ? ["capacitor-plugin-silent-notifications@7.0.1"] : []),
+  ];
+  console.log("capDepsAndPlugins", capDepsAndPlugins);
+
+  let result = spawnSync(
+    "npm",
+    ["install", "--legacy-peer-deps", ...capDepsAndPlugins],
+    {
+      cwd: buildDir,
+      maxBuffer: 1024 * 1024 * 10,
+    }
+  );
+  console.log(result.output.toString());
+
+  if (includeNativeBuildTools) {
+    console.log("installing cordova plugins");
+    const cordovaPlugins = [
+      "cordova-plugin-file@8.1.3",
+      "cordova-plugin-inappbrowser@6.0.0",
+    ];
+    result = spawnSync(
+      "npm",
+      ["install", "--legacy-peer-deps", ...cordovaPlugins],
+      {
+        cwd: buildDir,
+        maxBuffer: 1024 * 1024 * 10,
+      }
+    );
+  }
+}
+
+/**
+ * Full local build dir setup: template + build tooling + Capacitor/native
+ * deps. Used by the normal (non-remote) build path, which does everything
+ * on one machine.
+ * @param includeNativeBuildTools forwarded to installCapacitorDeps - false for a remote bundle
+ */
+export function prepareBuildDir(
+  buildDir: string,
+  templateDir: string,
+  pushEnabled: boolean,
+  backgroundFetchEnabled: boolean,
+  pushSyncEnabled: boolean,
+  includeNativeBuildTools: boolean = true
+) {
+  prepareBuildDirBase(buildDir, templateDir);
+  installCapacitorDeps(
+    buildDir,
+    pushEnabled,
+    backgroundFetchEnabled,
+    pushSyncEnabled,
+    includeNativeBuildTools
+  );
+}
+
+/** Build-time configuration passed to `writeCapacitorConfig`. */
+export interface ScCapacitorConfig {
+  appName: string;
+  appId?: string;
+  appVersion: string;
+  keystorePath?: string;
+  keystoreAlias?: string;
+  keystorePassword?: string;
+  keystoreAliasPassword?: string;
+  buildType: string;
+}
+
+/**
+ * Write `capacitor.config.ts` into the build directory.
+ * @param buildDir directory where the app will be built
+ * @param config capacitor build settings
+ */
+export function writeCapacitorConfig(
+  buildDir: string,
+  config: ScCapacitorConfig
+) {
+  const cfgFile = join(buildDir, "capacitor.config.ts");
+  const content = `
+import type { CapacitorConfig } from '@capacitor/cli';
+
+const config: CapacitorConfig  = {
+  appId: '${config.appId ? config.appId : "com.saltcorn.mobile.app"}',
+  appName: '${config.appName ? config.appName : "SaltcornMobileApp"}',
+  webDir: "www",
+  // ios.limitsNavigationsToAppBoundDomains was dropped - it caused noisy
+  // script-injection warnings and wasn't needed for the cookie fix to work.
+  android: {
+    buildOptions: {
+      ${
+        config.keystorePath && config.buildType === "release"
+          ? `keystorePath: '${config.keystorePath}',
+      keystorePassword: '${config.keystorePassword}',
+      keystoreAlias: '${config.keystoreAlias}',
+      keystoreAliasPassword: '${config.keystoreAliasPassword}',
+      `
+          : ""
+      }
+      releaseType: '${config.buildType === "release" ? "AAB" : "APK"}',
+    },
+  },
+  server: {
+    // App's origin on iOS - must match MOBILE_APP_ORIGINS in server/app.js.
+    iosScheme: 'SaltcornMobileApp',
+  },
+  plugins: {
+    // Needed together with WKAppBoundDomains (see modifyInfoPlist) to
+    // exempt the remote server's session cookie from iOS's third-party
+    // cookie blocking.
+    CapacitorHttp: {
+      enabled: true,
+    },
+    CapacitorCookies: {
+      enabled: true,
+    },
+    CapacitorSQLite: {
+      iosDatabaseLocation: 'Library/CapacitorDatabase',
+      iosIsEncryption: true,
+      iosKeychainPrefix: 'angular-sqlite-app-starter',
+      iosBiometric: {
+        biometricAuth: false,
+        biometricTitle : "Biometric login for capacitor sqlite"
+      },
+      androidIsEncryption: true,
+      androidBiometric: {
+        biometricAuth : false,
+        biometricTitle : "Biometric login for capacitor sqlite",
+        biometricSubTitle : "Log in using your biometric"
+      },
+      electronIsEncryption: true,
+      electronWindowsLocation: "C:\\ProgramData\\CapacitorDatabases",
+      electronMacLocation: "/Volumes/Development_Lacie/Development/Databases",
+      electronLinuxLocation: "Databases"
+    }
+  }
+
+};
+
+export default config;`;
+  writeFileSync(cfgFile, content);
+}
+
+/**
+ * Copy the app icon into all required asset slots (icon, splash variants).
+ * @param buildDir directory where the app will be built
+ * @param appIcon path to the source PNG
+ */
+export function prepAppIcon(buildDir: string, appIcon: string) {
+  for (const icon of [
+    "icon-only",
+    "icon-foreground",
+    "icon-background",
+    "splash",
+    "splash-dark",
+  ]) {
+    copySync(appIcon, join(buildDir, "assets", `${icon}.png`), {
+      overwrite: true,
+    });
+  }
+}
+
+/**
+ * Returns the Android permissions required for the build.
+ * @param allowFCM include FCM/push notification permissions
+ * @returns array of Android permission strings
+ */
+export function androidPermissions(allowFCM: boolean) {
+  const state = getState();
+  if (!state) throw new Error("Unable to get the state object");
+  const permissions = new Set<String>([
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+    "android.permission.INTERNET",
+    "android.permission.CAMERA",
+  ]);
+  if (allowFCM) {
+    permissions.add("android.permission.POST_NOTIFICATIONS");
+    permissions.add("com.google.android.c2dm.permission.RECEIVE");
+  }
+  for (const capPlugin of state.capacitorPlugins) {
+    for (const perm of capPlugin.androidPermissions || []) {
+      permissions.add(perm);
+    }
+  }
+  return Array.from(permissions);
+}
+
+/**
+ * Returns the Android hardware features required for the build.
+ * @returns array of Android feature strings
+ */
+export function androidFeatures() {
+  const state = getState();
+  if (!state) throw new Error("Unable to get the state object");
+  const features = new Set<String>(["android.hardware.camera"]);
+  for (const capPlugin of state.capacitorPlugins) {
+    for (const feature of capPlugin.androidFeatures || []) {
+      features.add(feature);
+    }
+  }
+  return Array.from(features);
+}
+
+/**
+ * Patch `AndroidManifest.xml` with permissions, features, and optional intents.
+ * @param buildDir directory where the app will be built
+ * @param allowShareTo add share-to intent filter
+ * @param allowFCM add FCM push notification support
+ * @param allowAuthIntent add authentication intent
+ */
+export async function modifyAndroidManifest(
+  buildDir: string,
+  allowShareTo: boolean,
+  allowFCM: boolean,
+  allowAuthIntent: boolean
+) {
+  console.log("modifyAndroidManifest");
+  try {
+    const androidManifest = join(
+      buildDir,
+      "android",
+      "app",
+      "src",
+      "main",
+      "AndroidManifest.xml"
+    );
+    const content = readFileSync(androidManifest);
+    const parsed = await parseStringPromise(content);
+
+    parsed.manifest["uses-permission"] = androidPermissions(allowFCM).map(
+      (perm) => ({
+        $: { "android:name": perm },
+      })
+    );
+    parsed.manifest["uses-feature"] = androidFeatures().map((feat) => ({
+      $: { "android:name": feat },
+    }));
+
+    parsed.manifest.application[0].$ = {
+      ...parsed.manifest.application[0].$,
+      "android:allowBackup": "false",
+      "android:fullBackupContent": "false",
+      "android:dataExtractionRules": "@xml/data_extraction_rules",
+      "android:networkSecurityConfig": "@xml/network_security_config",
+    };
+
+    if (allowFCM) {
+      parsed.manifest.application[0]["meta-data"] = [
+        ...(parsed.manifest.application[0]["meta-data"] || []),
+        {
+          $: {
+            "android:name":
+              "com.google.firebase.messaging.default_notification_channel_id",
+            "android:value": "default_channel_id",
+          },
+        },
+      ];
+    }
+
+    if (allowShareTo) {
+      // add the send-intent activity
+      parsed.manifest.application[0].activity = [
+        ...parsed.manifest.application[0].activity,
+        {
+          $: {
+            "android:name": "de.mindlib.sendIntent.SendIntentActivity",
+            "android:label": "@string/app_name",
+            "android:exported": "true",
+            "android:theme": "@style/AppTheme.NoActionBar",
+          },
+          "intent-filter": [
+            {
+              action: [{ $: { "android:name": "android.intent.action.SEND" } }],
+              category: [
+                { $: { "android:name": "android.intent.category.DEFAULT" } },
+              ],
+              data: [
+                { $: { "android:mimeType": "text/plain" } },
+                { $: { "android:mimeType": "image/*" } },
+                { $: { "android:mimeType": "application/*" } },
+                { $: { "android:mimeType": "video/*" } },
+              ],
+            },
+          ],
+        },
+      ];
+    }
+
+    if (allowAuthIntent) {
+      parsed.manifest.application[0].activity[0]["intent-filter"] = [
+        ...(parsed.manifest.application[0].activity[0]["intent-filter"] || []),
+        {
+          $: { "android:autoVerify": "true" },
+          action: [{ $: { "android:name": "android.intent.action.VIEW" } }],
+          category: [
+            { $: { "android:name": "android.intent.category.DEFAULT" } },
+            { $: { "android:name": "android.intent.category.BROWSABLE" } },
+          ],
+          data: [
+            {
+              $: {
+                "android:scheme": "mobileapp",
+                "android:host": "auth",
+                "android:path": "/callback",
+              },
+            },
+          ],
+        },
+      ];
+    }
+    const xmlBuilder = new Builder();
+    const newCfg = xmlBuilder.buildObject(parsed);
+    writeFileSync(androidManifest, newCfg);
+  } catch (error: any) {
+    console.log(
+      `Unable to modify the AndroidManifest.xml: ${
+        error.message ? error.message : "Unknown error"
+      }`
+    );
+  }
+}
+
+/**
+ * Returns true if any of the included plugins exposes an authentication method.
+ * @param plugins list of included plugin names
+ * @returns whether an auth method is available
+ */
+export function hasAuthMethod(plugins: string[]) {
+  const state = getState();
+  for (const pluginName of plugins) {
+    const plugin = state!.plugins[pluginName];
+    if (plugin && plugin.authentication) return true;
+  }
+  return false;
+}
+
+/**
+ * Write the Android data extraction rules XML (excludes app data from backups).
+ * @param buildDir directory where the app will be built
+ */
+export function writeDataExtractionRules(buildDir: string) {
+  console.log("writeDataExtractionRules");
+  const dataExtractionRules = join(
+    buildDir,
+    "android",
+    "app",
+    "src",
+    "main",
+    "res",
+    "xml",
+    "data_extraction_rules.xml"
+  );
+  writeFileSync(
+    dataExtractionRules,
+    `<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+      <exclude domain="root" />
+      <exclude domain="database" />
+      <exclude domain="sharedpref" />
+      <exclude domain="external" />
+    </cloud-backup>
+    <device-transfer>
+      <exclude domain="root" />
+      <exclude domain="database" />
+      <exclude domain="sharedpref" />
+      <exclude domain="external" />
+    </device-transfer>
+</data-extraction-rules>
+`
+  );
+}
+
+/**
+ * Copy the pre-populated SQLite database into the platform asset directories.
+ * @param buildDir directory where the app will be built
+ * @param platforms target platforms (`"android"` / `"ios"`)
+ */
+export function copyPrepopulatedDb(buildDir: string, platforms: string[]) {
+  console.log("copyPrepopulatedDb", buildDir, platforms);
+  if (platforms.includes("android")) {
+    copySync(
+      join(buildDir, "www", "scdb.sqlite"),
+      join(
+        buildDir,
+        "android",
+        "app",
+        "src",
+        "main",
+        "assets",
+        "public",
+        "assets",
+        "databases",
+        "prepopulated.db"
+      )
+    );
+  }
+  if (platforms.includes("ios")) {
+    copySync(
+      join(buildDir, "www", "scdb.sqlite"),
+      join(
+        buildDir,
+        "ios",
+        "App",
+        "App",
+        "public",
+        "assets",
+        "databases",
+        "prepopulated.db"
+      )
+    );
+  }
+}
+
+/**
+ * Extract the bare domain name from a URL (strips protocol, port, trailing slash).
+ * @param url full server URL
+ * @returns domain string
+ */
+export function extractDomain(url: string) {
+  let domain = url;
+  if (domain.startsWith("http://")) domain = domain.substring(7);
+  if (domain.startsWith("https://")) domain = domain.substring(8);
+  if (domain.endsWith("/")) domain = domain.substring(0, domain.length - 1);
+  if (domain.includes(":")) domain = domain.substring(0, domain.indexOf(":"));
+  return domain;
+}
+
+/**
+ * Write the Android network security config. HTTPS is required, so this is
+ * always the restrictive (no cleartext) version.
+ * @param buildDir directory where the app will be built
+ */
+export function writeNetworkSecurityConfig(buildDir: string) {
+  console.log("writeNetworkSecurityConfig");
+  const networkSecurityConfig = join(
+    buildDir,
+    "android",
+    "app",
+    "src",
+    "main",
+    "res",
+    "xml",
+    "network_security_config.xml"
+  );
+  const content = `<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+  <base-config cleartextTrafficPermitted="false" />
+</network-security-config>`;
+  writeFileSync(networkSecurityConfig, content);
+}
+
+/**
+ *
+ * Patch `config.xml` with app name, app ID, and version.
+ * @param buildDir directory where the app will be built
+ * @param config object with optional `appName`, `appId`, and `appVersion` fields
+ */
+export async function modifyConfigXml(buildDir: string, config: any) {
+  try {
+    const configXml = join(buildDir, "config.xml");
+    const content = readFileSync(configXml);
+    const parsed = await parseStringPromise(content);
+    if (config.appName) parsed.widget.name[0] = config.appName;
+    if (config.appId) parsed.widget.$.id = config.appId;
+    if (config.appVersion) parsed.widget.$.version = config.appVersion;
+    const xmlBuilder = new Builder();
+    const newCfg = xmlBuilder.buildObject(parsed);
+    writeFileSync(configXml, newCfg);
+  } catch (error: any) {
+    console.log(
+      `Unable to modify the config.xml: ${
+        error.message ? error.message : "Unknown error"
+      }`
+    );
+  }
+}
+
+/**
+ * copy a png file into the build dir and use it as launcher icon
+ * @param buildDir
+ * @param appIcon path to appIcon file
+ */
+export async function prepareAppIcon(
+  buildDir: string,
+  appIcon: string,
+  platforms: string[]
+) {
+  try {
+    if (platforms.includes("android"))
+      copySync(appIcon, join(buildDir, "res", "icon", "android", "icon.png"), {
+        overwrite: true,
+      });
+    if (platforms.includes("ios")) await prepareAppIconSet(buildDir, appIcon);
+  } catch (error: any) {
+    console.log(
+      `Unable to set the app icon '${appIcon}': ${
+        error.message ? error.message : "Unknown error"
+      }`
+    );
+  }
+}
+
+/**
+ * copy a png file into the build dir and use it as splash icon
+ * This shows up before the splash page, while the infrastructure loads
+ * TODO for now it's only one png for all sizes
+ * @param buildDir
+ * @param splashIcon
+ * @param platforms
+ */
+export async function prepareSplashIcon(
+  buildDir: string,
+  splashIcon: string,
+  platforms: string[]
+) {
+  try {
+    if (platforms.includes("android")) {
+      copySync(
+        splashIcon,
+        join(buildDir, "res", "screen", "android", "splash-icon.png"),
+        {
+          overwrite: true,
+        }
+      );
+    }
+    if (platforms.includes("ios")) {
+      copySync(
+        splashIcon,
+        join(
+          buildDir,
+          "res",
+          "screen",
+          "ios",
+          "Default@2x~universal~anyany.png"
+        ),
+        {
+          overwrite: true,
+        }
+      );
+    }
+  } catch (error: any) {
+    console.log(
+      `Unable to set the splash icon '${splashIcon}': ${
+        error.message ? error.message : "Unknown error"
+      }`
+    );
+  }
+}
+
+/**
+ * Generate the iOS `AppIcon.appiconset` with all required sizes.
+ * @param buildDir directory where the app will be built
+ * @param appIcon path to the source PNG
+ */
+async function prepareAppIconSet(buildDir: string, appIcon: string) {
+  console.log("prepareAppIconSet", buildDir, appIcon);
+  const dir = join(buildDir, "AppIcon.appiconset");
+  mkdirSync(dir);
+  const contentsJSON = { images: new Array<any>() };
+  try {
+    for (const { size, scale, idiom } of [
+      { size: 29, scale: 1, idiom: "iphone" },
+      { size: 20, scale: 2, idiom: "iphone" },
+      { size: 40, scale: 2, idiom: "iphone" },
+      { size: 57, scale: 1, idiom: "iphone" },
+      { size: 60, scale: 2, idiom: "iphone" },
+      { size: 76, scale: 2, idiom: "ipad" },
+      { size: 83.5, scale: 2, idiom: "ipad" },
+      { size: 1024, scale: 1, idiom: "ios-marketing" },
+    ]) {
+      const scaledSize = size * scale;
+      const fileName = `${size}x${scale}.png`;
+      await resizer({
+        fromFileName: appIcon,
+        width: scaledSize,
+        height: scaledSize,
+        toFileName: join(dir, fileName),
+      });
+      contentsJSON.images.push({
+        size: `${size}x${size}`,
+        idiom: idiom,
+        filename: fileName,
+        "expected-size": scaledSize,
+        scale: `${scale}x`,
+      });
+    }
+    writeFileSync(join(dir, "Contents.json"), JSON.stringify(contentsJSON));
+  } catch (error: any) {
+    console.log(
+      `Unable to generate appicon set for '${appIcon}': ${
+        error.message ? error.message : "Unknown error"
+      }`
+    );
+  }
+}
+
+/**
+ * Write `ExportOptions.plist` used by `xcodebuild -exportArchive`.
+ * @param param0 buildDir, appId, and iOS provisioning parameters
+ */
+export function prepareExportOptionsPlist({ buildDir, appId, iosParams }: any) {
+  console.log("prepareExportOptionsPlist", buildDir, appId, iosParams);
+  const buildShareExtBloock = () => {
+    if (!iosParams.shareExtensionProvisioningProfile) return "";
+    const teamId = iosParams.appleTeamId;
+    const shareExtIdentifier =
+      iosParams.shareExtensionProvisioningProfile.identifier;
+    return `<key>${shareExtIdentifier.replace(`${teamId}.`, "")}</key>
+            <string>${
+              iosParams.shareExtensionProvisioningProfile.guuid
+            }</string>`;
+  };
+  try {
+    const method = iosParams.isAdHoc ? "ad-hoc" : "app-store-connect";
+    writeFileSync(
+      join(buildDir, "ExportOptions.plist"),
+      `<?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "~//Apple/DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0">
+        <dict>
+          <key>method</key>
+          <string>${method}</string>
+          <key>provisioningProfiles</key>
+          <dict>          
+            <key>${appId}</key>
+            <string>${iosParams.mainProvisioningProfile.guuid}</string>
+            ${buildShareExtBloock()}
+          </dict>
+        </dict>
+
+      </plist>`
+    );
+  } catch (error: any) {
+    console.log(
+      `Unable to write the ExportOptionsPlist file: ${
+        error.message ? error.message : "Unknown error"
+      }`
+    );
+  }
+}
+
+/**
+ * Patch `Info.plist` with background modes, usage descriptions, and optional URL schemes.
+ * @param buildDir directory where the app will be built
+ * @param allowShareTo add URL scheme for share-to integration
+ * @param backgroundSyncEnabled background sync task is scheduled
+ * @param pushSyncEnabled add remote-notification background mode
+ * @param backgroundFetchEnabled background.js is included (sync or heartbeat configured)
+ * @param serverURL server URL, added to WKAppBoundDomains for the iOS cookie
+ * fix - changing servers (e.g. a new ngrok URL) needs a rebuild to apply.
+ */
+export function modifyInfoPlist(
+  buildDir: string,
+  allowShareTo: boolean,
+  backgroundSyncEnabled: boolean,
+  pushSyncEnabled: boolean,
+  backgroundFetchEnabled: boolean = false,
+  serverURL?: string
+) {
+  const infoPlist = join(buildDir, "ios", "App", "App", "Info.plist");
+  const content = readFileSync(infoPlist, "utf8");
+  let appBoundHostname: string | undefined;
+  if (serverURL) {
+    try {
+      appBoundHostname = new URL(serverURL).hostname;
+    } catch {
+      // invalid/missing URL - skip WKAppBoundDomains rather than write a broken plist
+    }
+  }
+
+  const backgroundModes = [
+    ...(backgroundFetchEnabled ? ["fetch", "processing"] : []),
+    ...(pushSyncEnabled ? ["remote-notification"] : []),
+  ];
+
+  const taskIds = [
+    "com.transistorsoft.fetch",
+    ...(backgroundSyncEnabled ? ["com.transistorsoft.background_sync"] : []),
+    ...(backgroundFetchEnabled
+      ? ["com.transistorsoft.push_sync_heartbeat"]
+      : []),
+  ];
+
+  const newCfgs = `
+  ${
+    backgroundFetchEnabled
+      ? `<key>BGTaskSchedulerPermittedIdentifiers</key>
+  <array>
+    ${taskIds.map((id) => `<string>${id}</string>`).join("\n    ")}
+  </array>
+  `
+      : ""
+  }
+
+  ${
+    backgroundModes.length > 0
+      ? `<key>UIBackgroundModes</key>
+  <array>
+    ${backgroundModes.map((m) => `<string>${m}</string>`).join("\n    ")}
+  </array>
+  `
+      : ""
+  }
+  <key>NSCameraUsageDescription</key>
+  <string>This app requires access to the camera to take photos</string>
+  <key>NSPhotoLibraryUsageDescription</key>
+  <string>This app requires access to the photo library to select photos</string>
+  <key>NSPhotoLibraryAddUsageDescription</key>
+  <string>This app requires access to the photo library to save photos</string>
+
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>This app requires access to your location to save it in the database</string>
+
+  <key>UIFileSharingEnabled</key>
+  <true/>
+  <key>LSSupportsOpeningDocumentsInPlace</key>
+  <true/>
+  ${
+    appBoundHostname
+      ? `<key>WKAppBoundDomains</key>
+  <array>
+    <string>${appBoundHostname}</string>
+  </array>`
+      : ""
+  }
+  ${
+    allowShareTo
+      ? `<key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>CFBundleURLName</key>
+      <string>com.saltcorn.store</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>scappscheme</string>
+      </array>
+    </dict>
+  </array>`
+      : ""
+  }
+`;
+  // add newCfgs after the first <dict> tag
+  const newContent = content.replace(/<dict>/, `<dict>${newCfgs}`);
+  writeFileSync(infoPlist, newContent, "utf8");
+}
+
+/**
+ * Write `App.entitlements` with the optional APNs environment and app group.
+ * @param buildDir directory where the app will be built
+ * @param buildType `"debug"` → development APNs, `"release"` → production APNs
+ * @param pushSync include the APNs environment entitlement
+ * @param appGroupId optional app group ID for share extension data sharing
+ */
+export function writeEntitlementsPlist(
+  buildDir: string,
+  buildType: "debug" | "release",
+  pushSync: boolean,
+  appGroupId?: string
+) {
+  const file = join(buildDir, "ios", "App", "App", "App.entitlements");
+  const apsEnv = buildType === "release" ? "production" : "development";
+  const apsEnvEntry = pushSync
+    ? `    <key>aps-environment</key>
+    <string>${apsEnv}</string>`
+    : "";
+  const appGroupsEntry = appGroupId
+    ? `    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>${appGroupId}</string>
+    </array>`
+    : "";
+  try {
+    writeFileSync(
+      file,
+      `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+${apsEnvEntry}
+${appGroupsEntry}
+</dict>
+</plist>`
+    );
+  } catch (error: any) {
+    console.log(
+      `Unable to write the Entitlements plist file: ${
+        error.message ? error.message : "Unknown error"
+      }`
+    );
+  }
+}
+
+/**
+ * Inject `CODE_SIGN_ENTITLEMENTS` into `project.pbxproj` for the App target.
+ * Uses `INFOPLIST_FILE = App/Info.plist;` as an anchor (unique to the App target).
+ * Idempotent — skips if the key is already present.
+ * @param buildDir directory where the app will be built
+ */
+export function injectCodeSignEntitlements(buildDir: string) {
+  const pbxprojPath = join(
+    buildDir,
+    "ios",
+    "App",
+    "App.xcodeproj",
+    "project.pbxproj"
+  );
+  try {
+    let content = readFileSync(pbxprojPath, "utf8");
+    // check for this exact insertion, not just any CODE_SIGN_ENTITLEMENTS -
+    // the share-ext target sets its own, which isn't the same thing
+    if (content.includes("CODE_SIGN_ENTITLEMENTS = App/App.entitlements;")) {
+      console.log("CODE_SIGN_ENTITLEMENTS already set in project.pbxproj");
+      return;
+    }
+    content = content.replaceAll(
+      "INFOPLIST_FILE = App/Info.plist;",
+      `CODE_SIGN_ENTITLEMENTS = App/App.entitlements;\n\t\t\t\tINFOPLIST_FILE = App/Info.plist;`
+    );
+    writeFileSync(pbxprojPath, content, "utf8");
+    console.log("CODE_SIGN_ENTITLEMENTS set in project.pbxproj for App target");
+  } catch (error: any) {
+    console.log(
+      `Unable to set CODE_SIGN_ENTITLEMENTS in project.pbxproj: ${
+        error.message ?? "Unknown error"
+      }`
+    );
+  }
+}
+
+/**
+ * Copy share extension source files into the iOS project directory.
+ * @param buildDir directory where the app will be built
+ */
+export function copyShareExtFiles(buildDir: string) {
+  const iosAppDir = join(buildDir, "ios", "App");
+  const sefDir = join(buildDir, "share_extension_files");
+  copySync(
+    join(sefDir, "ShareViewController.swift"),
+    join(iosAppDir, "share-ext", "ShareViewController.swift"),
+    { overwrite: true }
+  );
+  copySync(
+    join(sefDir, "Info.plist"),
+    join(iosAppDir, "share-ext", "Info.plist"),
+    { overwrite: true }
+  );
+}
+
+/**
+ * Replace `YOUR_APP_GROUP_ID` placeholder in `ShareViewController.swift`.
+ * @param buildDir directory where the app will be built
+ * @param groupId app group identifier
+ */
+export function modifyShareViewController(buildDir: string, groupId: string) {
+  const shareVCFile = join(
+    buildDir,
+    "ios",
+    "App",
+    "share-ext",
+    "ShareViewController.swift"
+  );
+  let content = readFileSync(shareVCFile, "utf8");
+  // replace all YOUR_APP_GROUP_ID placeholders with groupId
+  content = content.replace(/YOUR_APP_GROUP_ID/g, groupId);
+  writeFileSync(shareVCFile, content, "utf8");
+}
+
+/**
+ * Write the entitlements plist for the share extension target (app group
+ * only - no APNs entry, extensions don't receive push notifications).
+ * @param buildDir directory where the app will be built
+ * @param appGroupId app group ID shared with the main app
+ * @returns path to the entitlements file, relative to `ios/App`
+ */
+function writeShareExtEntitlementsPlist(
+  buildDir: string,
+  appGroupId: string
+): string {
+  const relPath = join("share-ext", "ShareExtension.entitlements");
+  const file = join(buildDir, "ios", "App", relPath);
+  writeFileSync(
+    file,
+    `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>${appGroupId}</string>
+    </array>
+</dict>
+</plist>`
+  );
+  return relPath;
+}
+
+/**
+ * Add a "share-ext" Share Extension target to `App.xcodeproj`, so the app
+ * can be built with iOS share-to support without ever opening Xcode.
+ * @param buildDir directory where the app will be built
+ * @param appId main app's bundle id - the extension's is `${appId}.share-ext`
+ * @param appGroupId optional app group ID, wired into a matching
+ *   entitlements plist for the new target
+ */
+export function createShareExtensionTarget(
+  buildDir: string,
+  appId: string,
+  appGroupId?: string
+) {
+  const iosAppDir = join(buildDir, "ios", "App");
+  const projectPath = join(iosAppDir, "App.xcodeproj");
+  const entitlementsRelPath = appGroupId
+    ? writeShareExtEntitlementsPlist(buildDir, appGroupId)
+    : undefined;
+  const scriptPath = join(__dirname, "xcode", "create_share_extension.rb");
+  const args = [scriptPath, projectPath, `${appId}.share-ext`];
+  if (entitlementsRelPath) args.push(entitlementsRelPath);
+  const result = spawnSync("ruby", args, { cwd: iosAppDir });
+  if (result.status !== 0) {
+    throw new Error(
+      `Unable to create the share extension target: ${
+        result.stderr?.toString() || result.error?.message || "unknown error"
+      }`
+    );
+  }
+  console.log(result.stdout?.toString());
+}
+
+/**
+ * Patch `AppDelegate.swift` to register background tasks and push handlers.
+ * @param buildDir directory where the app will be built
+ * @param pushSyncEnabled register remote-notification handler
+ * @param allowShareTo register URL scheme handler for share-to
+ * @param backgroundFetchEnabled initialize TSBackgroundFetch (sync or heartbeat)
+ */
+export function modifyAppDelegate(
+  buildDir: string,
+  pushSyncEnabled: boolean,
+  allowShareTo: boolean,
+  backgroundFetchEnabled: boolean = false
+) {
+  const appDelegateFile = join(
+    buildDir,
+    "ios",
+    "App",
+    "App",
+    "AppDelegate.swift"
+  );
+  let content = readFileSync(appDelegateFile, "utf8");
+
+  // modify cusomization point after application launch
+  content = content.replace(
+    /func application\(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: \[UIApplication.LaunchOptionsKey: Any\]\?\) -> Bool {/,
+    `func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        // Override point for customization after application launch.
+
+
+       ${
+         backgroundFetchEnabled
+           ? `// [capacitor-background-fetch]
+       let fetchManager = TSBackgroundFetch.sharedInstance();
+       fetchManager?.didFinishLaunching();`
+           : ""
+       }
+
+       self.window?.rootViewController?.navigationController?.interactivePopGestureRecognizer?.isEnabled = false;
+`
+  );
+
+  if (backgroundFetchEnabled) {
+    // add "import TSBackgroundFetch" before "@UIApplicationMain"
+    content = content.replace(
+      /@UIApplicationMain/,
+      `import TSBackgroundFetch
+
+@UIApplicationMain`
+    );
+
+    // add fetch handler at the end of the file, before the last }
+    content = content.replace(
+      /}\s*$/,
+      `
+    // [capacitor-background-fetch]
+   func application(_ application: UIApplication, performFetchWithCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+       print("BackgroundFetchPlugin AppDelegate received fetch event");
+       let fetchManager = TSBackgroundFetch.sharedInstance();
+       fetchManager?.perform(completionHandler: completionHandler, applicationState: application.applicationState);
+   }
+}
+`
+    );
+  }
+  if (pushSyncEnabled) {
+    content = content.replace(
+      /}\s*$/,
+      `
+
+  // [capacitor-push-notifications]
+  func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+    NotificationCenter.default.post(name: .capacitorDidRegisterForRemoteNotifications, object: deviceToken)
+  }
+
+  // [capacitor-push-notifications]
+  func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+    NotificationCenter.default.post(name: .capacitorDidFailToRegisterForRemoteNotifications, object: error)
+  }
+
+  // ------------------------------
+
+  // [silent push notification handler]
+  func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable : Any], fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+    // debug
+    print("Received by: didReceiveRemoteNotification w/ fetchCompletionHandler")
+
+    // Perform background operation, need to create a plugin
+    NotificationCenter.default.post(name: Notification.Name(rawValue: "silentNotificationReceived"), object: nil, userInfo: userInfo)
+
+    // Give the listener a few seconds to complete, system allows for 30 - we give 25. The system will kill this after 30 seconds.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
+        // Execute after 25 seconds
+        completionHandler(.newData)
+    }
+  }
+    
+  // [silent push notification handler]
+  // we just add this to deal with an iOS simulator bug, this method is deprecated as of iOS 13
+  // func application(_ application: UIApplication, performFetchWithCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+  //     // debug
+  //     print("Received by: performFetchWithCompletionHandler")
+      
+  //     // Perform background operation, need to create a plugin
+  //     NotificationCenter.default.post(name: Notification.Name(rawValue: "silentNotificationReceived"), object: nil, userInfo: nil)
+
+  //     // Give the listener a few seconds to complete, system allows for 30 - we give 25. The system will kill this after 30 seconds.
+  //     DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
+  //         // Execute after 25 seconds
+  //         completionHandler(.newData)
+  //     }
+  // }
+}
+`
+    );
+  }
+
+  if (allowShareTo) {
+    // add "import TSBackgroundFetch" before "@UIApplicationMain"
+    content = content.replace(
+      /@UIApplicationMain/,
+      `import SendIntent
+
+@UIApplicationMain`
+    );
+
+    const replacement = `
+    let store = ShareStore.store
+    
+    func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey : Any] = [:]) -> Bool {
+        
+        var success = true
+        if CAPBridge.handleOpenUrl(url, options) {
+            success = ApplicationDelegateProxy.shared.application(app, open: url, options: options)
+        }
+        
+        guard let components = NSURLComponents(url: url, resolvingAgainstBaseURL: true),
+              let params = components.queryItems else {
+                  return false
+              }
+        let titles = params.filter { $0.name == "title" }
+        let descriptions = params.filter { $0.name == "description" }
+        let types = params.filter { $0.name == "type" }
+        let urls = params.filter { $0.name == "url" }
+        
+        store.shareItems.removeAll()
+    
+        if (titles.count > 0) {
+            for index in 0...titles.count-1 {
+                var shareItem: JSObject = JSObject()
+                shareItem["title"] = titles[index].value!
+                shareItem["description"] = descriptions[index].value!
+                shareItem["type"] = types[index].value!
+                shareItem["url"] = urls[index].value!
+                store.shareItems.append(shareItem)
+            }
+        }
+        
+        store.processed = false
+        let nc = NotificationCenter.default
+        nc.post(name: Notification.Name("triggerSendIntent"), object: nil )
+        
+        return success
+    }
+  }`;
+    const regex =
+      /func application\(_ app: UIApplication,\s*open url: URL,\s*options:\s*\[UIApplication\.OpenURLOptionsKey\s*:\s*Any\]\s*=\s*\[:\]\)\s*->\s*Bool\s*\{[\s\S]*?\n\}/;
+    content = content.replace(regex, replacement);
+  }
+
+  writeFileSync(appDelegateFile, content, "utf8");
+}
+
+export function writePrivacyInfo(
+  buildDir: string,
+  backgroundFetchEnabled: boolean
+) {
+  const infoFile = join(buildDir, "ios", "App", "PrivacyInfo.xcprivacy");
+  const content = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+      <!-- Add this dict entry to the array if the PrivacyInfo file already exists -->
+      <dict>
+        <key>NSPrivacyAccessedAPIType</key>
+        <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+        <key>NSPrivacyAccessedAPITypeReasons</key>
+        <array>
+          <string>C617.1</string>
+        </array>
+      </dict>
+
+      ${
+        backgroundFetchEnabled
+          ? `
+      <!-- [1] background_fetch: UserDefaults -->
+      <dict>
+          <key>NSPrivacyAccessedAPIType</key>
+          <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+
+          <key>NSPrivacyAccessedAPITypeReasons</key>
+          <array>
+              <string>CA92.1</string>
+          </array>
+        </dict>`
+          : ""
+      }
+    </array>
+  </dict>
+</plist>`;
+  writeFileSync(infoFile, content);
+}
+
+/**
+ * copy files from 'server/public' into the www folder (with a version_tag prefix)
+ * @param buildDir directory where the app will be build
+ */
+export function copyServerFiles(buildDir: string) {
+  const wwwDir = join(buildDir, "www");
+  // assets
+  const assetsDst = join(wwwDir, "static_assets", db.connectObj.version_tag);
+  if (!existsSync(assetsDst)) {
+    mkdirSync(assetsDst, { recursive: true });
+  }
+  const serverRoot = join(
+    require.resolve("@saltcorn/server/package.json"),
+    ".."
+  );
+  const srcPrefix = join(serverRoot, "public");
+  const srcAssests = [
+    "jquery-3.6.0.min.js",
+    "saltcorn-common.js",
+    "saltcorn.js",
+    "saltcorn.css",
+    "saltcorn-mobile.css",
+    "codemirror.js",
+    "codemirror.css",
+    "socket.io.min.js",
+    "flatpickr.min.css",
+    "gridedit.js",
+    "flatpickr.min.js",
+    "dayjs.min.js",
+  ];
+  for (const srcFile of srcAssests) {
+    copySync(join(srcPrefix, srcFile), join(assetsDst, srcFile));
+  }
+  // publics
+  const srcs = ["flatpickr.min.css", "flatpickr.min.js", "gridedit.js"];
+  for (const srcFile of srcs) {
+    copySync(join(srcPrefix, srcFile), join(wwwDir, srcFile));
+  }
+}
+
+/**
+ * Copy the 'site_logo_id' file into the www folder
+ * @param buildDir
+ * @returns
+ */
+export async function copySiteLogo(buildDir: string) {
+  try {
+    const state = getState();
+    if (!state) {
+      console.log("Unable to get the state object");
+    } else {
+      await state.refresh_config(true);
+      const siteLogo = state?.getConfig("site_logo_id");
+      if (siteLogo) {
+        const file = await File.findOne(siteLogo);
+        if (file) {
+          const base64 = readFileSync(file.location, "base64");
+          writeFileSync(
+            join(buildDir, "www", "data", "encoded_site_logo.txt"),
+            `data:${file.mimetype};base64, ${base64}`
+          );
+        } else {
+          console.log(`The file '${siteLogo}' does not exist`);
+        }
+      }
+    }
+  } catch (error: any) {
+    console.log(
+      `Unable to copy the site logo: ${
+        error.message ? error.message : "Unknown error"
+      }`
+    );
+  }
+}
+
+/**
+ * create a cfg file, the app use this configs
+ * @param param0
+ */
+export function writeCfgFile({
+  buildDir,
+  entryPoint,
+  entryPointType,
+  serverPath,
+  synchedTables,
+  tenantAppName,
+  autoPublicLogin,
+  showContinueAsPublicUser,
+  allowOfflineMode,
+  syncOnReconnect,
+  syncOnAppResume,
+  pushSync,
+  syncInterval,
+  pushSyncHeartbeatInterval,
+  allowShareTo,
+  apnsEnvironment,
+}: any) {
+  const wwwDir = join(buildDir, "www");
+  let cfg: any = {
+    version_tag: db.connectObj.version_tag,
+    entryPointType: entryPointType,
+    server_path: !serverPath.endsWith("/")
+      ? serverPath
+      : serverPath.substring(0, serverPath.length - 1),
+    synchedTables,
+    autoPublicLogin,
+    showContinueAsPublicUser,
+    allowOfflineMode,
+    syncOnReconnect,
+    syncOnAppResume,
+    pushSync,
+    syncInterval,
+    pushSyncHeartbeatInterval,
+    allowShareTo,
+    apnsEnvironment,
+  };
+  if (entryPointType !== "byrole") {
+    cfg.entry_point = `get/${
+      entryPointType === "pagegroup" ? "page" : entryPointType
+    }/${entryPoint}`;
+  }
+  if (tenantAppName) cfg.tenantAppName = tenantAppName;
+  writeFileSync(
+    join(buildDir, "www", "data", "config.js"),
+    `var _sc_mobile_config = ${JSON.stringify(cfg)}`
+  );
+}
+
+const filterPluginFunc = async (state: any, plugin: any) => {
+  let module = state.plugins[plugin.name];
+  if (!module) module = state.plugins[state.plugin_module_names[plugin.name]];
+  if (module?.configuration_workflow) {
+    try {
+      const flow = await module.configuration_workflow();
+      for (const step of flow?.steps || []) {
+        if (step.form) {
+          const form = await step.form({});
+          for (const field of form?.fields || []) {
+            if (field.exclude_from_mobile || field.input_type === "password") {
+              delete plugin.configuration[field.name];
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.log(`Error in configuration_workflow of plugin ${plugin.name}`);
+      console.log(error);
+    }
+  }
+  return plugin;
+};
+
+const filterTableFunc = async (state: any, table: any) => {
+  let result = table;
+  if (table.provider_name) {
+    const oldProviderCfg = JSON.parse(
+      JSON.stringify(table.provider_cfg || {})
+    );
+    const provider = state.table_providers[table.provider_name];
+    if (provider?.configuration_workflow) {
+      try {
+        const flow = await provider.configuration_workflow();
+        for (const step of flow?.steps || []) {
+          if (step.form) {
+            const form = await step.form(oldProviderCfg);
+            for (const field of form?.fields || []) {
+              if (
+                field.exclude_from_mobile ||
+                field.input_type === "password"
+              ) {
+                delete result.provider_cfg[field.name];
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.log(
+          `Error in configuration_workflow of table provider ${table.provider_name}`
+        );
+        console.log(error);
+      }
+    }
+  }
+  return result;
+};
+
+const filterFunc = async (
+  state: any,
+  table: string,
+  rows: any,
+  includedPlugins?: string[]
+) => {
+  switch (table) {
+    case "_sc_plugins":
+      const included = rows.filter((plugin: any) =>
+        includedPlugins ? includedPlugins.includes(plugin.name) : true
+      );
+      return await Promise.all(
+        included.map((plugin: any) => filterPluginFunc(state, plugin))
+      );
+    case "_sc_config":
+      const allCfgs = state.configs;
+      // remove cfgs with excludeFromMobile or input_type=password
+      return rows.filter((row: any) => {
+        const cfg = allCfgs[row.key];
+        return (
+          cfg && !(cfg.excludeFromMobile || cfg.input_type === "password")
+        );
+      });
+    case "_sc_tables":
+      return await Promise.all(
+        rows.map((table: any) => filterTableFunc(state, table))
+      );
+    default:
+      return rows;
+  }
+};
+
+/**
+ * Reads and filters all _sc_ table rows for the sync/tables data dump.
+ * @param includedPlugins names of plugins that are bundled into the app
+ */
+const computeTablesData = async (includedPlugins?: string[]) => {
+  const state = getState();
+  if (!state) throw new Error("Unable to get the state object");
+  await state.refresh_config(true);
+
+  const scTables = (await db.listScTables()).filter(
+    (table: Row) =>
+      [
+        "_sc_migrations",
+        "_sc_errors",
+        "_sc_session",
+        "_sc_event_log",
+        "_sc_snapshots",
+        "_sc_workflow_runs",
+        "_sc_workflow_trace",
+      ].indexOf(table.name) === -1
+  );
+  const tablesWithData = await Promise.all(
+    scTables.map(async (row: Row) => {
+      const dbData = await db.select(row.name);
+      return {
+        table: row.name,
+        rows: await filterFunc(state, row.name, dbData, includedPlugins),
+      };
+    })
+  );
+  return { createdAt: new Date(), sc_tables: tablesWithData };
+};
+
+/**
+ * create a file with all data from the db
+ * the app updates its local db from this
+ * @param buildDir directory where the app will be build
+ * @param includedPlugins names of plugins that are bundled into the app
+ */
+export async function buildTablesFile(
+  buildDir: string,
+  includedPlugins?: string[]
+) {
+  const wwwDir = join(buildDir, "www", "data");
+  const { createdAt, sc_tables } = await computeTablesData(includedPlugins);
+  writeFileSync(
+    join(wwwDir, "tables.json"),
+    JSON.stringify({
+      created_at: createdAt.valueOf(),
+      sc_tables,
+    })
+  );
+  writeFileSync(
+    join(wwwDir, "tables_created_at.json"),
+    JSON.stringify({
+      created_at: createdAt.valueOf(),
+    })
+  );
+}
+
+const walkDir = (dir: string): string[] => {
+  const results: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) results.push(...walkDir(full));
+    else results.push(full);
+  }
+  return results;
+};
+
+/**
+ * Zip a directory's contents (recursively), entry names relative to sourceDir.
+ * @param sourceDir directory to zip
+ * @param outputPath path of the zip file to write
+ */
+export async function zipDirectory(sourceDir: string, outputPath: string) {
+  const zip = await ZipBuilder.toFile(outputPath);
+  for (const filePath of walkDir(sourceDir)) {
+    const entryName = relative(sourceDir, filePath).split(sep).join("/");
+    await zip.addLocalFile(entryName, filePath);
+  }
+  await zip.finish();
+}
+
+/** Options controlling what a remote /api/mobile-app/build-bundle response contains. */
+export type RemoteAppBundleOptions = {
+  includedPlugins?: string[];
+  platforms: string[];
+  synchedTables?: string[];
+  entryPoint: string;
+  entryPointType: string;
+  serverURL: string;
+  splashPage?: string;
+  tenantAppName?: string;
+  buildType: string;
+  autoPublicLogin?: string;
+  showContinueAsPublicUser?: boolean;
+  allowOfflineMode?: string;
+  syncOnReconnect?: boolean;
+  syncOnAppResume?: boolean;
+  pushSync?: boolean;
+  syncInterval?: number;
+  pushSyncHeartbeatInterval?: number;
+};
+
+/**
+ * Fetches the remote server's prepared www/ bundle and extracts it into buildDir/www.
+ * @param buildDir directory where the app will be build
+ * @param remoteSchemaUrl the /api/mobile-app/build-bundle URL
+ * @param apiKey bearer token for an admin user on that server
+ * @param options this machine's build settings, so the remote content matches
+ */
+export async function fetchRemoteAppBundle(
+  buildDir: string,
+  remoteSchemaUrl: string,
+  apiKey: string | undefined,
+  options: RemoteAppBundleOptions
+) {
+  const url = new URL(
+    `${remoteSchemaUrl.replace(/\/+$/, "")}/api/mobile-app/build-bundle`
+  );
+  if (options.includedPlugins?.length)
+    url.searchParams.set("includedPlugins", options.includedPlugins.join(","));
+  for (const platform of options.platforms)
+    url.searchParams.append("platforms", platform);
+  for (const table of options.synchedTables || [])
+    url.searchParams.append("synchedTables", table);
+  // empty in by-role mode - omit rather than send the literal string "undefined"
+  if (options.entryPoint)
+    url.searchParams.set("entryPoint", options.entryPoint);
+  url.searchParams.set("entryPointType", options.entryPointType);
+  url.searchParams.set("serverURL", options.serverURL);
+  if (options.splashPage) url.searchParams.set("splashPage", options.splashPage);
+  if (options.tenantAppName)
+    url.searchParams.set("tenantAppName", options.tenantAppName);
+  url.searchParams.set("buildType", options.buildType);
+  if (options.autoPublicLogin)
+    url.searchParams.set("autoPublicLogin", options.autoPublicLogin);
+  if (options.showContinueAsPublicUser)
+    url.searchParams.set("showContinueAsPublicUser", "true");
+  if (options.allowOfflineMode)
+    url.searchParams.set("allowOfflineMode", options.allowOfflineMode);
+  if (options.syncOnReconnect) url.searchParams.set("syncOnReconnect", "true");
+  if (options.syncOnAppResume) url.searchParams.set("syncOnAppResume", "true");
+  if (options.pushSync) url.searchParams.set("pushSync", "true");
+  if (options.syncInterval)
+    url.searchParams.set("syncInterval", String(options.syncInterval));
+  if (options.pushSyncHeartbeatInterval)
+    url.searchParams.set(
+      "pushSyncHeartbeatInterval",
+      String(options.pushSyncHeartbeatInterval)
+    );
+
+  const headers: Record<string, string> = apiKey
+    ? { Authorization: `Bearer ${apiKey}` }
+    : {};
+  const readError = async (res: Response): Promise<string | undefined> => {
+    try {
+      return ((await res.json()) as any)?.error;
+    } catch {
+      return undefined;
+    }
+  };
+
+  console.log(`Fetching remote app bundle from ${remoteSchemaUrl}...`);
+  // poll instead of one long request - some NAT/routers kill an idle connection
+  const startRes = await fetch(url.toString(), { method: "POST", headers });
+  if (!startRes.ok)
+    throw new Error(
+      `Unable to start remote app bundle build at ${url}: ${(await readError(startRes)) || `${startRes.status} ${startRes.statusText}`}`
+    );
+  const { job_id } = (await startRes.json()) as { job_id: string };
+
+  // origin+pathname, not url.toString() - that still has the build options
+  const statusUrl = new URL(url.pathname + "/status", url.origin);
+  statusUrl.searchParams.set("job_id", job_id);
+  const POLL_DEADLINE = Date.now() + 30 * 60 * 1000;
+  while (true) {
+    if (Date.now() > POLL_DEADLINE)
+      throw new Error(
+        `Timed out waiting for the remote app bundle build to finish (job ${job_id})`
+      );
+    await new Promise((r) => setTimeout(r, 3000));
+    const statusRes = await fetch(statusUrl.toString(), { headers });
+    if (!statusRes.ok)
+      throw new Error(
+        `Unable to check remote app bundle build status at ${statusUrl}: ${statusRes.status} ${statusRes.statusText}`
+      );
+    const { status, error } = (await statusRes.json()) as {
+      status: "running" | "done" | "error";
+      error?: string;
+    };
+    if (status === "error")
+      throw new Error(`Unable to build remote app bundle: ${error}`);
+    if (status === "done") break;
+  }
+
+  const resultUrl = new URL(url.pathname + "/result", url.origin);
+  resultUrl.searchParams.set("job_id", job_id);
+  const resultRes = await fetch(resultUrl.toString(), { headers });
+  if (!resultRes.ok)
+    throw new Error(
+      `Unable to fetch remote app bundle from ${resultUrl}: ${(await readError(resultRes)) || `${resultRes.status} ${resultRes.statusText}`}`
+    );
+  // saved in buildDir (not just os.tmpdir()) so it's easy to find and
+  // inspect alongside the rest of the build output; not part of the app
+  // itself, so keeping it around here is harmless
+  const tmpZip = join(buildDir, "remote-bundle.zip");
+  writeFileSync(tmpZip, Buffer.from(await resultRes.arrayBuffer()));
+  console.log(`Remote app bundle saved to ${tmpZip}`);
+  await extractZip(tmpZip, join(buildDir, "www"));
+  console.log("Remote app bundle fetch finished");
+}
+
+/**
+ * copy files form 'server/locales' into the app
+ * @param buildDir directory where the app will be build
+ */
+export function copyTranslationFiles(buildDir: string) {
+  const localesDir = join(
+    require.resolve("@saltcorn/server/package.json"),
+    "..",
+    "locales"
+  );
+  copySync(localesDir, join(buildDir, "www", "data", "locales"));
+}
+
+/**
+ * init an empty db
+ * after the first startup, this db will be updated from the tables.json
+ * @param buildDir directory where the app will be build
+ */
+export async function createSqliteDb(buildDir: string) {
+  const result = spawnSync(getSafeSaltcornCmd(), ["add-schema", "-f"], {
+    env: {
+      ...process.env,
+      FORCE_SQLITE: "true",
+      SQLITE_FILEPATH: join(buildDir, "www", "scdb.sqlite"),
+    },
+  });
+  if (result.error) {
+    console.log(result.error);
+    return -1;
+  } else {
+    console.log(
+      result.output
+        ? result.output.toString()
+        : "'reset-schema' finished without output"
+    );
+    return result.status;
+  }
+}
+
+/**
+ * Prepare a splash page
+ * runs a page and writes the html into 'splash_page.html' of the www directory
+ * @param buildDir
+ * @param pageName splash page
+ * @param serverUrl needed, if 'pageName' uses images from the server
+ * @param tenantAppName
+ * @param user
+ */
+export async function prepareSplashPage(
+  buildDir: string,
+  pageName: string,
+  serverUrl: string,
+  tenantAppName?: string,
+  user?: User
+) {
+  try {
+    const role = user ? user.role_id : 100;
+    const page = Page.findOne({ name: pageName });
+    if (!page) throw new Error(`The page '${pageName}' does not exist`);
+    const state = getState();
+    if (!state) throw new Error("Unable to get the state object");
+    // @ts-ignore
+    global.window = {};
+    const runExtra = {
+      req: {
+        user,
+        getLocale: () => {
+          return "en";
+        },
+        isSplashPage: true,
+      },
+    };
+    const contents = await page.run({}, runExtra as any);
+    const sbadmin2 = state.plugins["sbadmin2"];
+    const html = (<PluginLayout>sbadmin2.layout).wrap({
+      title: page.title,
+      body: !contents
+        ? { above: [] }
+        : "above" in contents
+        ? contents
+        : { above: [contents] },
+      alerts: [],
+      role: role,
+      menu: [],
+      headers: [
+        { css: `static_assets/${db.connectObj.version_tag}/saltcorn.css` },
+        {
+          script: `static_assets/${db.connectObj.version_tag}/saltcorn-common.js`,
+        },
+        { script: `static_assets/${db.connectObj.version_tag}/dayjs.min.js` },
+        { script: "js/iframe_view_utils.js" },
+        {
+          headerTag: `<script>parent.splashConfig = { server_path: '${serverUrl}', tenantAppName: ${tenantAppName}, };</script>`,
+        },
+      ],
+      brand: { name: "" },
+      bodyClass: "",
+      currentUrl: "",
+    });
+    // @ts-ignore
+    global.window = undefined;
+    writeFileSync(join(buildDir, "www", "splash_page.html"), html);
+  } catch (error) {
+    console.log("Unable to build a splash page");
+    console.log(error);
+  }
+}
+
+/**
+ * Write the iOS `Podfile` and run `pod install`.
+ * @param buildDir directory where the app will be built
+ * @param hasPush include push notification pods
+ * @param hasBackgroundFetch include background fetch pod
+ * @param hasSilentPush include silent-notifications pod
+ */
+export function writePodfile(
+  buildDir: string,
+  hasPush: boolean,
+  hasBackgroundFetch: boolean,
+  hasSilentPush: boolean
+) {
+  const state = getState();
+  let hasGeolocation = false;
+  if (state) {
+    for (const plugin of state.capacitorPlugins || []) {
+      if (plugin.name === "@capacitor/geolocation") {
+        hasGeolocation = true;
+      }
+    }
+  }
+
+  const podfileContent = `
+  require_relative '../../node_modules/@capacitor/ios/scripts/pods_helpers'
+  
+  platform :ios, '13.0'
+  use_frameworks!
+  
+  # workaround to avoid Xcode caching of Pods that requires
+  # Product -> Clean Build Folder after new Cordova plugins installed
+  # Requires CocoaPods 1.6 or newer
+  install! 'cocoapods', :disable_input_output_paths => true
+  
+  def capacitor_pods
+    pod 'Capacitor', :path => '../../node_modules/@capacitor/ios'
+    pod 'CapacitorCordova', :path => '../../node_modules/@capacitor/ios'
+    pod 'CapacitorApp', :path => '../../node_modules/@capacitor/app'
+    pod 'CapacitorCommunitySqlite', :path => '../../node_modules/@capacitor-community/sqlite'
+    pod 'CapacitorCamera', :path => '../../node_modules/@capacitor/camera'
+    pod 'CapacitorFilesystem', :path => '../../node_modules/@capacitor/filesystem'
+    pod 'CapacitorFileTransfer', :path => '../../node_modules/@capacitor/file-transfer'
+    ${
+      hasGeolocation
+        ? `pod 'CapacitorGeolocation', :path => '../../node_modules/@capacitor/geolocation'`
+        : ""
+    }
+    pod 'CapacitorNetwork', :path => '../../node_modules/@capacitor/network'
+    pod 'CapacitorScreenOrientation', :path => '../../node_modules/@capacitor/screen-orientation'
+    pod 'SendIntent', :path => '../../node_modules/send-intent'
+    pod 'CordovaPlugins', :path => '../capacitor-cordova-ios-plugins'
+    pod 'CordovaPluginsResources', :path => '../capacitor-cordova-ios-plugins'
+    ${
+      hasPush || hasSilentPush
+        ? `pod 'CapacitorPushNotifications', :path => '../../node_modules/@capacitor/push-notifications'
+    pod 'CapacitorDevice', :path => '../../node_modules/@capacitor/device'`
+        : ""
+    }
+    ${
+      hasSilentPush
+        ? `pod 'CapacitorPluginSilentNotifications', :path => '../../node_modules/capacitor-plugin-silent-notifications'`
+        : ""
+    }
+    ${
+      hasBackgroundFetch
+        ? `pod 'TransistorsoftCapacitorBackgroundFetch', :path => '../../node_modules/@transistorsoft/capacitor-background-fetch'`
+        : ""
+    }
+  end
+  
+  target 'App' do
+    capacitor_pods
+    # Add your Pods here
+  end
+  
+  post_install do |installer|
+    assertDeploymentTarget(installer)
+    installer.pods_project.targets.each do |target|
+      target.build_configurations.each do |config|
+        config.build_settings['EXPANDED_CODE_SIGN_IDENTITY'] = ''
+        config.build_settings['CODE_SIGNING_REQUIRED'] = 'NO'
+        config.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'
+      end
+    end
+  end`;
+  const podfilePath = join(buildDir, "ios", "App", "Podfile");
+  writeFileSync(podfilePath, podfileContent, "utf8");
+  // run pod install
+  const result = spawnSync("pod", ["install"], {
+    cwd: join(buildDir, "ios", "App"),
+    env: {
+      ...process.env,
+      NODE_ENV: "development",
+    },
+  });
+}
+
+/**
+ * @param buildDir
+ * @param appVersion new app version
+ */
+export function modifyXcodeProjectFile(
+  buildDir: string,
+  appVersion: string,
+  iosCfg: IosCfg
+) {
+  const projectFile = join(
+    buildDir,
+    "ios",
+    "App",
+    "App.xcodeproj",
+    "project.pbxproj"
+  );
+  let fileContent = readFileSync(projectFile, "utf8");
+  if (iosCfg.shareExtensionProvisioningProfile) {
+    const shareExtId =
+      iosCfg.shareExtensionProvisioningProfile.identifier.replace(
+        `${iosCfg.appleTeamId}.`,
+        ""
+      );
+    // modify debug/release blocks of the share extension target
+    for (const targetCfgBlock of fileContent.match(
+      new RegExp(`buildSettings = {[^}]*${shareExtId}[^}]*};`, "g")
+    ) || []) {
+      let newCfgBlock = targetCfgBlock
+        .replaceAll(/"CODE_SIGN_IDENTITY.*\n/g, "")
+        .replaceAll(/CODE_SIGN_STYLE.*\n/g, "")
+        .replaceAll(/DEVELOPMENT_TEAM.*\n/g, "")
+        .replaceAll(/"DEVELOPMENT_TEAM.*\n/g, "")
+        .replaceAll(/PROVISIONING_PROFILE_SPECIFIER.*\n/g, "")
+        .replaceAll(/"PROVISIONING_PROFILE_SPECIFIER.*\n/g, "")
+        // set new values
+        .replaceAll(
+          /MARKETING_VERSION = 1.0;/g,
+          `        MARKETING_VERSION = ${appVersion};
+        "CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
+        CODE_SIGN_STYLE = Manual;
+        DEVELOPMENT_TEAM="";
+        "DEVELOPMENT_TEAM[sdk=iphoneos*]" = ${iosCfg.appleTeamId};
+        PROVISIONING_PROFILE_SPECIFIER = "";
+        "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "${iosCfg.shareExtensionProvisioningProfile.specifier}";`
+        );
+      fileContent = fileContent.replace(targetCfgBlock, newCfgBlock);
+    }
+  }
+  fileContent = fileContent.replaceAll(
+    /MARKETING_VERSION = 1.0;/g,
+    `MARKETING_VERSION = ${appVersion};`
+  );
+  writeFileSync(projectFile, fileContent, "utf8");
+}
+
+/**
+ * Convert a semver string to an Android integer version code (`major*1e6 + minor*1e3 + patch`).
+ * @param appVersion semver string e.g. `"1.2.3"`
+ * @returns integer version code
+ */
+export function generateAndroidVersionCode(appVersion: string) {
+  if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(appVersion) || appVersion === "0.0.0")
+    throw new Error(`Invalid app version '${appVersion}'`);
+  const parts = appVersion.split(".");
+  return (
+    parseInt(parts[0]) * 1000000 +
+    parseInt(parts[1]) * 1000 +
+    parseInt(parts[2])
+  );
+}
+
+/**
+ * Patch `build.gradle` with the app version and optional keystore signing config.
+ * @param buildDir directory where the app will be built
+ * @param appVersion semver string used for `versionName` and `versionCode`
+ * @param keyStoreData signing credentials; omit for unsigned debug builds
+ */
+export function modifyGradleConfig(
+  buildDir: string,
+  appVersion: string,
+  keyStoreData?: {
+    keystorePath: string;
+    keystorePassword: string;
+    keyAlias: string;
+    keyPassword: string;
+  }
+) {
+  console.log("modifyGradleConfig");
+  const gradleFile = join(buildDir, "android", "app", "build.gradle");
+  const gradleContent = readFileSync(gradleFile, "utf8");
+  const versionCode = generateAndroidVersionCode(appVersion);
+  let newGradleContent = gradleContent
+    .replace(/versionName "1.0"/, `versionName "${appVersion}"`)
+    .replace(/versionCode 1/, `versionCode ${versionCode}`);
+
+  if (keyStoreData) {
+    const signingConfigs = `
+    signingConfigs {
+      debug {
+        storeFile file("${keyStoreData.keystorePath}")
+        storePassword "${keyStoreData.keystorePassword}"
+        keyAlias "${keyStoreData.keyAlias}"
+        keyPassword "${keyStoreData.keyPassword}"
+      }
+  }`;
+    // add a new line with signingConfigs above     "defaultConfig {"
+    newGradleContent = newGradleContent.replace(
+      /defaultConfig \{/,
+      `${signingConfigs}
+    defaultConfig {`
+    );
+
+    const debugBuildTypesBlock = `
+    debug {
+      signingConfig signingConfigs.debug
+    }`;
+    // add the debug build type block above   "release {"
+    newGradleContent = newGradleContent.replace(
+      /release \{/,
+      `${debugBuildTypesBlock}
+    release {`
+    );
+  }
+  writeFileSync(gradleFile, newGradleContent, "utf8");
+}

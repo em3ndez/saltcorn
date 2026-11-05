@@ -1,6 +1,6 @@
-const request = require("supertest");
-const getApp = require("../app");
-const {
+import { request as request } from "../auth/testhelp.js";
+import getApp from "../app.js";
+import {
   toRedirect,
   getAdminLoginCookie,
   itShouldRedirectUnauthToLogin,
@@ -8,11 +8,11 @@ const {
   toNotInclude,
   toSucceed,
   resetToFixtures,
-} = require("../auth/testhelp");
-const db = require("@saltcorn/data/db");
-const { getState } = require("@saltcorn/data/db/state");
-const View = require("@saltcorn/data/models/view");
-const Table = require("@saltcorn/data/models/table");
+} from "../auth/testhelp.js";
+import db from "@saltcorn/data/db";
+import { getState } from "@saltcorn/data/db/state";
+import View from "@saltcorn/data/models/view";
+import Table from "@saltcorn/data/models/table";
 
 afterAll(db.close);
 beforeAll(async () => {
@@ -24,8 +24,8 @@ const pack = {
   tables: [
     {
       name: "cats",
-      min_role_read: 1,
-      min_role_write: 1,
+      min_role_read: 100,
+      min_role_write: 100,
       versioned: false,
       fields: [
         {
@@ -75,7 +75,7 @@ const pack = {
         latitude_field: "lat",
         longtitude_field: "long",
       },
-      min_role: 10,
+      min_role: 100,
       table: "cats",
     },
     {
@@ -100,7 +100,7 @@ const pack = {
         ],
         viewname: "ShowName",
       },
-      min_role: 10,
+      min_role: 100,
       table: "cats",
     },
     {
@@ -115,7 +115,7 @@ const pack = {
         reload_on_drag: false,
         view_to_create: "",
       },
-      min_role: 10,
+      min_role: 100,
       table: "cats",
     },
     {
@@ -130,7 +130,7 @@ const pack = {
         reload_on_drag: false,
         view_to_create: "",
       },
-      min_role: 10,
+      min_role: 100,
       table: "cats",
     },
     {
@@ -151,7 +151,7 @@ const pack = {
         columns: [],
         viewname: "NestedShow",
       },
-      min_role: 10,
+      min_role: 100,
       table: "cats",
     },
     {
@@ -165,7 +165,7 @@ const pack = {
         latitude_field: "lat",
         longtitude_field: "long",
       },
-      min_role: 10,
+      min_role: 100,
       table: "cats",
     },
     {
@@ -180,7 +180,7 @@ const pack = {
         reload_on_drag: false,
         view_to_create: "",
       },
-      min_role: 10,
+      min_role: 100,
       table: "cats",
     },
     {
@@ -201,7 +201,7 @@ const pack = {
         columns: [],
         viewname: "NestedShowNoPop",
       },
-      min_role: 10,
+      min_role: 100,
       table: "cats",
     },
     {
@@ -216,7 +216,7 @@ const pack = {
         reload_on_drag: false,
         view_to_create: "",
       },
-      min_role: 10,
+      min_role: 100,
       table: "cats",
     },
   ],
@@ -256,7 +256,7 @@ describe("Kitten tracker", () => {
       .expect(toRedirect("/"));
   });
   it("should insert rows", async () => {
-    const tbl = await Table.findOne({ name: "cats" });
+    const tbl = Table.findOne({ name: "cats" });
     expect(!!tbl).toBe(true);
     await tbl.insertRow({ name: "Charlie", stage: "Kitten", lat: 51, long: 0 });
     await tbl.insertRow({

@@ -1,0 +1,1493 @@
+/**
+ * Field Data Access Layer
+ * @category saltcorn-data
+ * @module models/field
+ * @subcategory models
+ */
+
+import {
+  recalculate_for_stored,
+  jsexprToWhere,
+  eval_expression,
+  get_async_expression_function,
+  freeVariables,
+} from "./expression.js";
+import {
+  InvalidAdminAction,
+  isNode,
+  satisfies,
+  apply,
+  structuredClone,
+  validSqlId,
+  mergeIntoWhere,
+} from "../utils.js";
+import { getState } from "../db/state.js";
+import { add_free_variables_to_joinfields } from "../plugin-helper.js";
+import Table from "./table.js";
+import TableConstraint from "./table_constraints.js";
+import * as nsState from "../db/state.js";
+import db from "../db/index.js";
+import { sqlsanitize } from "@saltcorn/db-common/internal";
+import type {
+  Where,
+  SelectOptions,
+  Row,
+  Value,
+  JoinOptions,
+} from "@saltcorn/db-common/internal";
+import type {
+  ErrorMessage,
+  GenObj,
+  ResultMessage,
+  Type,
+} from "@saltcorn/types/common_types";
+import { instanceOfType } from "@saltcorn/types/common_types";
+import type {
+  FieldCfg,
+  AbstractField,
+  InputType,
+} from "@saltcorn/types/model-abstracts/abstract_field";
+import { AbstractTable } from "@saltcorn/types/model-abstracts/abstract_table";
+//import { fileSync } from "tmp-promise";
+import File from "./file.js";
+import { FieldView, CalcJoinfield } from "@saltcorn/types/base_types";
+import { ForUserRequest } from "@saltcorn/types/model-abstracts/abstract_user";
+
+const readKey = (v: any, field: Field): string | null | ErrorMessage => {
+  if (v === "" || v === "null" || v === "undefined") return null;
+  if (typeof v === "string" && v.startsWith("Preset:")) return v;
+  if (!field.reftype)
+    throw new Error("Unable to find the type, 'reftype' is undefined.");
+  const type =
+    getState()!.types[
+      typeof field.reftype === "string" ? field.reftype : field.reftype.name
+    ];
+  const parsed = type.read!(v);
+  return parsed || (v ? { error: "Unable to read key" } : null);
+};
+
+/**
+ * Field Class
+ * @category saltcorn-data
+ */
+class Field implements AbstractField {
+  label: string;
+  name: string;
+  fieldview?: string;
+  validator: (
+    value: any,
+    whole_rec?: Row,
+    field?: { required: boolean }
+  ) => boolean | string | undefined;
+  showIf?: { [field_name: string]: string | boolean | string[] };
+  parent_field?: string;
+  postText?: string;
+  class: string | string[];
+  id?: number;
+  default?: any;
+  sublabel?: string;
+  description?: string;
+  copilot_description?: string;
+  type?: string | Type;
+  typename?: string;
+  help?: { topic: string; context?: Row; dynContext?: string[] };
+  options?: any;
+  required: boolean;
+  is_unique: boolean;
+  hidden: boolean;
+  disabled: boolean;
+  calculated: boolean;
+  primary_key: boolean;
+  stored: boolean;
+  expression?: string;
+  sourceURL?: string;
+  is_fkey: boolean;
+  input_type: InputType;
+  reftable_name?: string;
+  tab?: string;
+  reftype?: string | Type;
+  refname: string = "";
+  reftable?: Table;
+  attributes: GenObj;
+  table_id?: number;
+  table?: Table | null;
+  in_auto_save?: boolean;
+  exclude_from_mobile?: boolean;
+  fieldviewObj?: FieldView;
+  preset_options?: string[];
+
+  // to use 'this[k] = v'
+
+  /**
+   * Constructor
+   * @param o
+   */
+  constructor(o: FieldCfg | Field) {
+    if (!o.name && !o.label)
+      throw new Error(`Field initialised with no name and no label`);
+    this.label = <string>(o.label || Field.nameToLabel(o.name as string));
+    this.name = <string>(o.name || Field.labelToName(this.label));
+    if (!o.type && !o.input_type)
+      throw new Error(`Field ${o.name} initialised with no type`);
+    this.fieldview = o.fieldview;
+    this.validator = o.validator || (() => true);
+    this.showIf = o.showIf;
+    this.parent_field = o.parent_field;
+    this.postText = o.postText;
+    this.class = o.class || "";
+    this.id = o.id;
+    this.default = o.default;
+    this.sublabel = o.sublabel;
+    this.description = o.description;
+    this.copilot_description = o.copilot_description;
+
+    this.type = typeof o.type === "string" ? getState()!.types[o.type] : o.type;
+    if (!this.type)
+      this.typename = typeof o.type === "string" ? o.type : o.type?.name;
+    this.options = o.options;
+    this.help = o.help;
+    this.required = !!o.required;
+    this.is_unique = !!o.is_unique;
+    this.hidden = o.hidden || false;
+    this.disabled = !!o.disabled;
+    this.calculated = !!o.calculated;
+    this.primary_key = !!o.primary_key;
+    this.stored = !!o.stored;
+    this.expression = o.expression;
+    this.sourceURL = o.sourceURL;
+    this.tab = o.tab;
+
+    this.is_fkey =
+      o.type === "Key" ||
+      (typeof o.type === "string" && o.type.startsWith("Key to"));
+
+    if (o.type === "File") {
+      this.type = "File";
+      this.input_type = this.fieldview ? "fromtype" : "file";
+    } else if (!this.is_fkey) {
+      this.input_type = o.input_type || "fromtype";
+    } else {
+      this.reftable_name = o.reftable_name || (o.reftable && o.reftable.name);
+      if (o.type && typeof o.type === "string" && o.type.startsWith("Key to "))
+        this.reftable_name = o.type.replace("Key to ", "");
+      this.reftable = o.reftable as Table;
+      this.type = "Key";
+      this.input_type =
+        !this.fieldview || this.fieldview === "select" ? "select" : "fromtype";
+      let default_reftype;
+      if (this.reftable && this.reftable.fields) {
+        const reffield = this.reftable.fields.find((f) => f.primary_key);
+        if (reffield)
+          default_reftype =
+            typeof reffield.type === "string"
+              ? reffield.type
+              : reffield.type?.name;
+      }
+
+      this.reftype = o.reftype || default_reftype || "Integer";
+      this.refname = o.refname || "id";
+    }
+
+    this.attributes =
+      typeof o.attributes === "string"
+        ? JSON.parse(o.attributes)
+        : o.attributes || {};
+    if (o.table_id) this.table_id = o.table_id;
+
+    if (o.table) {
+      this.table = o.table as Table;
+      if (o.table.id && !o.table_id) this.table_id = o.table.id;
+    }
+    this.in_auto_save = o.in_auto_save;
+    this.exclude_from_mobile = o.exclude_from_mobile;
+  }
+
+  get isRepeat() {
+    return false;
+  }
+
+  /**
+   * To Json
+   * @type {object}
+   */
+  get toJson(): any {
+    return {
+      id: this.id,
+      table_id: this.table_id,
+      name: this.name,
+      label: this.label,
+      is_unique: this.is_unique,
+      calculated: this.calculated,
+      stored: this.stored,
+      expression: this.expression,
+      sublabel: this.sublabel,
+      fieldview: this.fieldview,
+      type: typeof this.type === "string" ? this.type : this.type?.name,
+      reftable_name: this.reftable_name,
+      attributes: this.attributes,
+      required: this.required,
+      primary_key: this.primary_key,
+      reftype: this.reftype,
+      refname: this.refname,
+      description: this.description,
+    };
+  }
+
+  /**
+   * To Json
+   * @type {object}
+   */
+  get toBuilder(): any {
+    return {
+      id: this.id,
+      table_id: this.table_id,
+      name: this.name,
+      label: this.label,
+      is_unique: this.is_unique,
+      calculated: this.calculated,
+      stored: this.stored,
+      fieldview: this.fieldview,
+      type: typeof this.type === "string" ? this.type : this.type?.name,
+      input_type: this.input_type,
+      reftable_name: this.reftable_name,
+      attributes: this.attributes,
+      required: this.required,
+      primary_key: this.primary_key,
+      preset_options: this.preset_options,
+    };
+  }
+
+  /**
+   * Label 2 Name
+   * @param {string} label
+   * @returns {string}
+   */
+  // todo from internalization point of view better to separate label, name. sqlname
+  // because label can contain characters that cannot be used in PG for sql names
+  static labelToName(label: string): string {
+    return sqlsanitize(validSqlId(label.trim()));
+  }
+
+  static nameToLabel(label: string): string {
+    return label.split("_").join(" ");
+  }
+
+  get type_name(): string {
+    if (typeof this.type === "string") return this.type;
+    else if (this.type?.name) return this.type.name;
+    else if (this.typename) return this.typename;
+    else if (this.input_type) return this.input_type;
+    throw new Error("Field without type name");
+  }
+
+  /**
+   * ???
+   * @returns {string}
+   */
+  get form_name(): string {
+    if (this.parent_field) return `${this.parent_field}_${this.name}`;
+    else return this.name;
+  }
+
+  get fieldviews(): Record<string, FieldView> {
+    if (this.type === "File") return getState()!.fileviews;
+    if (this.is_fkey) return getState()!.keyFieldviews;
+    if (typeof this.type === "string") return {};
+    if (instanceOfType(this.type)) return this.type.fieldviews || {};
+    return {};
+  }
+
+  static async select_options_query(
+    table_name: string,
+    where: Where,
+    attributes: any,
+    extra_joinfields: any = {},
+    user?: any
+  ) {
+    const label_formula = attributes?.label_formula;
+    const joinFields = { ...extra_joinfields };
+
+    const table: Table | null = Table.findOne(table_name);
+    if (!table) {
+      return await db.select(table_name, where);
+    }
+    let q: JoinOptions & ForUserRequest = {
+      where,
+      joinFields,
+      forUser: user,
+      forPublic: user?.role_id === 100,
+    };
+    if (label_formula) {
+      const fields = table.getFields();
+      add_free_variables_to_joinfields(
+        freeVariables(label_formula),
+        joinFields,
+        fields
+      );
+    } else if (attributes.summary_field) {
+      q.fields = [table.pk_name, attributes.summary_field as string];
+    }
+
+    return await table.getJoinedRows(q);
+  }
+
+  /**
+   * Fills 'this.options' with values available via foreign key
+   * Could be used for <options /> in a <select/> to select a user
+   * @param [force_allow_none = false]
+   * @param where0
+   * @param extraCtx
+   * @param optionsQuery remote/local query to load rows from 'reftable_name'
+   * @param formFieldNames
+   * @returns
+   */
+  async fill_fkey_options(
+    force_allow_none: boolean = false,
+    where0?: Where,
+    extraCtx: any = {},
+    optionsQuery?: any,
+    formFieldNames?: string[],
+    existingValue?: any,
+    user?: any
+  ): Promise<void> {
+    let where = where0;
+    if (
+      !where &&
+      this.attributes.where &&
+      this.is_fkey &&
+      this.type !== "File"
+    ) {
+      const refTable = Table.findOne(this.reftable_name!)!;
+      const relFields = await refTable.getFields();
+      where = jsexprToWhere(this.attributes.where, extraCtx, relFields);
+    } else if (!where)
+      where = this.attributes.where
+        ? jsexprToWhere(this.attributes.where, extraCtx)
+        : undefined;
+
+    const fieldviewObj =
+      this.fieldviewObj ||
+      (typeof this.type === "string"
+        ? undefined
+        : this.type?.fieldviews?.[this.fieldview || ""]);
+    if (fieldviewObj?.fill_options) {
+      await fieldviewObj.fill_options(
+        this,
+        force_allow_none,
+        where,
+        extraCtx,
+        optionsQuery,
+        formFieldNames,
+        user
+      );
+      return;
+    }
+
+    const isDynamic = (formFieldNames || []).some((nm) =>
+      (this.attributes.where || "").includes("$" + nm)
+    );
+    if (isDynamic) {
+      const fakeEnv: any = {};
+      formFieldNames!.forEach((nm) => {
+        fakeEnv[nm] = "$" + nm;
+      });
+      if (user) fakeEnv.$user_id = user.id;
+
+      this.attributes.dynamic_where = {
+        table: this.reftable_name,
+        refname: this.refname,
+        where: this.attributes.where,
+        whereParsed: jsexprToWhere(this.attributes.where, fakeEnv),
+        existingValue,
+        summary_field: this.attributes.summary_field,
+        label_formula: this.attributes.label_formula,
+        neutral_label: this.attributes.neutral_label,
+        required: this.required || this.attributes.force_required,
+        placeholder: this.attributes.placeholder,
+      };
+    }
+    //console.log({ where, isDynamic, awhere: this.attributes.where });
+
+    if (
+      this.is_fkey &&
+      this.fieldview === "two_level_select" &&
+      this.attributes.relation
+    ) {
+      const refTable = Table.findOne(this.reftable_name!)!;
+      const relFields = await refTable.getFields();
+      const relField = relFields.find(
+        (f: any) => f.name === this.attributes.relation
+      );
+
+      const rows = await refTable.getJoinedRows({
+        forUser: user,
+        forPublic: user?.role_id === 100,
+        joinFields: {
+          first_level: {
+            ref: this.attributes.relation,
+            target: relField!.attributes.summary_field,
+          },
+        },
+      });
+      this.options = {};
+      rows.forEach((row: any) => {
+        const opt = {
+          label: row[this.attributes.summary_field],
+          value: row[this.refname],
+        };
+        if (!this.options[row.first_level])
+          this.options[row.first_level] = {
+            id: row[this.attributes.relation],
+            options: [opt],
+          };
+        else this.options[row.first_level].options.push(opt);
+      });
+      //console.log(this.options);
+    } else if (this.is_fkey) {
+      if (!this.attributes) this.attributes = {};
+      if (!this.attributes.select_file_where)
+        this.attributes.select_file_where = {};
+
+      const refTable = Table.findOne(this.reftable_name!)!;
+      const pk_name = refTable.pk_name;
+      if (fieldviewObj?.fill_options_restrict) {
+        const newWhere = fieldviewObj?.fill_options_restrict(
+          this,
+          existingValue
+        );
+        if (newWhere) where = newWhere;
+      }
+
+      const whereWithExisting =
+        existingValue && where
+          ? { or: [{ [pk_name]: existingValue }, where] } //TODO pk_name
+          : where;
+
+      const rows = !optionsQuery
+        ? await Field.select_options_query(
+            this.reftable_name as string,
+            this.type === "File"
+              ? this.attributes.select_file_where
+              : whereWithExisting,
+            this.attributes,
+            undefined,
+            user
+          )
+        : await optionsQuery(
+            this.reftable_name,
+            this.type,
+            this.attributes,
+            whereWithExisting,
+            user
+          );
+      const summary_field =
+        this.attributes.summary_field ||
+        (this.type === "File" ? "filename" : "id");
+      const get_label = this.attributes?.label_formula
+        ? (r: Row) =>
+            eval_expression(
+              this.attributes?.label_formula,
+              r,
+              undefined,
+              "Select label formula"
+            )
+        : (r: Row) => r[summary_field];
+      const dbOpts = rows.map((r: Row) => ({
+        label: get_label(r),
+        value: r[this.refname],
+      }));
+      const allOpts =
+        !this.required || force_allow_none
+          ? [{ label: "", value: "" }, ...dbOpts]
+          : dbOpts;
+      this.options = [...new Set(allOpts)];
+    } else if (this.type === "File" && isNode()) {
+      const files = await File.find(
+        this.attributes.folder
+          ? { folder: this.attributes.folder }
+          : this.attributes.select_file_where || {},
+        { recursive: true }
+      );
+      this.options = files
+        .filter((f) => !f.isDirectory)
+        .map((f) => ({
+          label: f.path_to_serve,
+          value: f.field_value,
+        }));
+      if (!this.required) this.options.unshift({ label: "", value: "" });
+    }
+  }
+
+  /**
+   * Distinct Values
+   * @param {object} [req]
+   * @param where
+   * @returns {Promise<void>}
+   */
+  async distinct_values(
+    req?: any,
+    where?: Where,
+    only_present?: boolean
+  ): Promise<{ label: string; value: string; jsvalue?: boolean }[]> {
+    const __ = req && req.__ ? req.__ : (s: string) => s;
+    if (
+      instanceOfType(this.type) &&
+      this.type.name === "String" &&
+      this.attributes &&
+      this.attributes.options &&
+      !only_present
+    ) {
+      return [
+        { label: "", value: "" },
+        ...this.attributes.options
+          .split(",")
+          .map((o: string) => ({ label: o.trim(), value: o.trim() })),
+      ];
+    }
+    this.fill_table();
+    if (this.table?.provider_name) {
+      const dvs = await this.table.distinctValues(this.name, where);
+      return dvs.map((v) => ({ label: v, value: v }));
+    }
+    if (this.is_fkey) {
+      await this.fill_fkey_options(
+        false,
+        where,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        req ? req.user || { role_id: 100 } : undefined
+      );
+      return this.options || [];
+    }
+    if (instanceOfType(this.type) && this.type.name === "Bool") {
+      return [
+        { label: "", value: "" },
+        { label: __("True"), value: "on", jsvalue: true },
+        { label: __("False"), value: "off", jsvalue: false },
+      ];
+    }
+    if (!this.table) return [];
+    let whereS = "";
+    let values = [];
+
+    const role_id = req ? req.user?.role_id || 100 : 1;
+    if (role_id > this.table.min_role_read) {
+      if (this.table.ownership_field_id) {
+        const ownership_field = this.table.fields.find(
+          (f) => f.id === this.table?.ownership_field_id
+        );
+        if (ownership_field) {
+          if (!where) where = {};
+          where[ownership_field.name] = req.user?.id;
+        }
+      } else if (this.table.ownership_formula) {
+        const wh = this.table.ownership_formula_where(req?.user);
+        if (!where) where = wh;
+        else
+          try {
+            mergeIntoWhere(where, wh);
+          } catch (e) {
+            //ignore, ownership formula is too difficult to merge with where
+            // TODO user groups
+          }
+      } else return [];
+    }
+    if (where) {
+      const whereValues = db.mkWhere(where);
+      whereS = whereValues.where;
+      values = whereValues.values;
+    }
+    const { rows } = await db.query(
+      `select distinct "${db.sqlsanitize(this.name)}" from ${
+        this.table?.sql_name
+      } ${whereS} order by "${db.sqlsanitize(this.name)}" limit 1000`,
+      values
+    );
+    const dbOpts = rows.map((r: Row) => ({
+      label: `${r[this.name]}`,
+      value: r[this.name],
+    }));
+    return [{ label: "", value: "" }, ...dbOpts];
+  }
+  /**
+   * @type {string}
+   */
+  get on_delete_sql(): string {
+    return this.attributes?.on_delete === "Cascade"
+      ? " on delete cascade"
+      : this.attributes?.on_delete === "Set null"
+        ? " on delete set null"
+        : this.attributes?.on_delete_cascade //legacy
+          ? " on delete cascade"
+          : "";
+  }
+  /**
+   * @type {string}
+   */
+  get sql_type(): string {
+    if (this.is_fkey) {
+      this.fill_table();
+
+      if (!this.reftype || !this.reftable_name) {
+        throw new Error(
+          "'reftype' and 'reftable_name' must be set if 'is_fkey' is true."
+        );
+      }
+      const schema = db.getTenantSchemaPrefix();
+      const on_delete = this.on_delete_sql;
+      const reftable = Table.findOne(this.reftable_name);
+      if (reftable?.external || reftable?.provider_name) {
+        const ref_pk = reftable.fields.find((f: Field) => f.primary_key);
+        if (!ref_pk)
+          throw new Error(
+            `Table ${this.reftable_name} does not have a primary key`
+          );
+        return ref_pk.sql_type;
+      }
+      const ref_sql_type = apply(
+        getState()!.types[
+          typeof this.reftype === "string" ? this.reftype : this.reftype.name
+        ].sql_name,
+        this.attributes
+      );
+      if (!db.inline_fk_in_column_type) return ref_sql_type as string;
+      return `${ref_sql_type} constraint "${sqlsanitize(
+        this!.table!.name
+      )}_${sqlsanitize(
+        this.name
+      )}_fkey" references ${schema}"${sqlsanitize(this.reftable_name)}" ("${
+        this.refname
+      }")${on_delete} DEFERRABLE`;
+    } else if (this.type === "File") {
+      return "text";
+    } else if (this.type && instanceOfType(this.type) && this.type.sql_name) {
+      return apply(this.type.sql_name, this.attributes);
+    }
+    throw new Error(
+      `Unable to get the sql_type: ${
+        this.type
+          ? JSON.stringify(this.type, null, 2)
+          : this.typename
+            ? this.typename
+            : "unknown type"
+      } for field ${this.name} in table ${this.table_id}`
+    );
+  }
+
+  /**
+   * @type {string}
+   */
+  get pretty_type(): string {
+    if (this.reftable_name === "_sc_files" || this.type === "File")
+      return "File";
+    if (this.is_fkey) return `Key to ${this.reftable_name}`;
+    else return this.type && instanceOfType(this.type) ? this.type.name : "?";
+  }
+
+  /**
+   * @type {string}
+   */
+  get sql_bare_type(): string {
+    if (this.is_fkey) {
+      if (!this.reftype || !this.reftable_name) {
+        throw new Error(
+          "'reftype' and 'reftable_name' must be set if 'is_fkey' is true."
+        );
+      }
+      return apply(
+        getState()!.types[
+          typeof this.reftype === "string" ? this.reftype : this.reftype.name
+        ].sql_name,
+        this.attributes
+      );
+    } else if (this.type && instanceOfType(this.type) && this.type.sql_name) {
+      return apply(this.type.sql_name, this.attributes);
+    } else if (this.type === "File") {
+      return "text";
+    }
+    throw new Error(
+      `Unable to get the sql_type for field ${this.name} in table ${this.table_id} type=${this.typename}`
+    );
+  }
+
+  /**
+   * @returns {Promise<any>}
+   */
+  async generate(): Promise<any> {
+    if (this.is_fkey) {
+      const rows = await db.select(
+        this.reftable_name as string,
+        {},
+        { limit: 1, orderBy: "RANDOM()" }
+      );
+      if (rows.length === 1) return rows[0].id;
+    } else {
+      if (instanceOfType(this.type) && this.type.contract)
+        return this.type.contract(this.attributes).generate();
+    }
+  }
+
+  /**
+   * @param {object} whole_rec
+   * @returns {object}
+   */
+
+  showIfEnabled(whole_rec: any) {
+    if (!this.showIf) return true;
+    for (const [k, v] of Object.entries(this.showIf)) {
+      if (Array.isArray(v) && !v.includes(whole_rec[k])) return false;
+      if (typeof v === "boolean" && !whole_rec[k]) return false;
+      if (whole_rec[k] !== v) return false;
+    }
+    return true;
+  }
+
+  get multipartFormData() {
+    if (this.input_type === "file") return true;
+    if (this.type !== "File") return false;
+    if (!this.fieldview) return false;
+    const fileview = getState()!.fileviews[this.fieldview];
+    return !!(fileview as any)?.multipartFormData;
+  }
+
+  validate(whole_rec: GenObj, originalBody?: GenObj): ResultMessage | {} {
+    const type = this.is_fkey ? { name: "Key" } : this.type;
+    let readval = null;
+    let typeObj = this.type as Type;
+    let fvObj = this.fieldview
+      ? typeObj?.fieldviews?.[this.fieldview]
+      : undefined;
+    if (
+      !fvObj?.readFromFormRecord &&
+      !typeObj?.readFromFormRecord &&
+      (fvObj?.read || typeObj?.read) &&
+      !this.required &&
+      typeof whole_rec[this.form_name] === "undefined" &&
+      originalBody?.[this.form_name] !== ""
+    )
+      return {};
+    if (this.is_fkey) {
+      readval = readKey(whole_rec[this.form_name], this);
+    } else {
+      if (fvObj?.readFromFormRecord) {
+        readval = fvObj.readFromFormRecord(whole_rec, this.form_name);
+      } else if (fvObj?.read) {
+        readval = fvObj.read(whole_rec[this.form_name], this.attributes);
+      } else {
+        readval =
+          !type || (!typeObj.read && !typeObj.readFromFormRecord)
+            ? whole_rec[this.form_name]
+            : typeObj.readFromFormRecord
+              ? typeObj.readFromFormRecord(whole_rec, this.form_name)
+              : (typeObj as any).read(
+                  whole_rec[this.form_name],
+                  this.attributes
+                );
+      }
+    }
+    if (typeof readval === "undefined" || readval === null)
+      if (this.required && this.type !== "File") {
+        if (this.showIfEnabled(whole_rec))
+          return { error: "Unable to read " + (<Type>type)?.name };
+        return { success: null };
+      } else return { success: null };
+    const tyvalres =
+      instanceOfType(type) && type.validate
+        ? type.validate(this.attributes || {})(readval)
+        : readval;
+    if (tyvalres.error) return tyvalres;
+    const fvalres = this.validator(readval, whole_rec, this);
+    if (typeof fvalres === "string") return { error: fvalres };
+    if (typeof fvalres === "undefined" || fvalres) return { success: readval };
+    else return { error: "Not accepted" };
+  }
+
+  /**
+   *
+   * @param {object} where
+   * @param {object} [selectopts]
+   * @returns {Field[]}
+   */
+  static async find(
+    where?: Where,
+    selectopts: SelectOptions = { orderBy: "name", nocase: true }
+  ): Promise<Field[]> {
+    if (selectopts.cached) {
+      return getState()!
+        .fields.map((t: FieldCfg) => new Field(structuredClone(t)))
+        .filter(satisfies(where || {}));
+    }
+
+    const db_flds = await db.select("_sc_fields", where, selectopts);
+    return db_flds.map((dbf: FieldCfg) => new Field(dbf));
+  }
+
+  /**
+   *
+   * @param {object} where
+   * @param {object} [selectopts]
+   * @returns {Field[]}
+   */
+  static findCached(where?: Where): Field[] {
+    return getState()!
+      .fields.map((t: FieldCfg) => new Field(structuredClone(t)))
+      .filter(satisfies(where || {}));
+  }
+
+  /**
+   * @param {object} where
+   * @returns {Promise<Field>}
+   */
+  static async findOne(where: Where): Promise<Field> {
+    const db_fld = await db.selectOne("_sc_fields", where);
+    return new Field(db_fld);
+  }
+
+  /**
+   * @returns {Promise<void>}
+   */
+  async add_unique_constraint(): Promise<void> {
+    this.fill_table();
+    await db.add_unique_constraint(this.table?.name, [this.name]);
+  }
+
+  /**
+   * @returns {Promise<void>}
+   */
+  async remove_unique_constraint(): Promise<void> {
+    this.fill_table();
+    try {
+      await db.drop_unique_constraint(this.table?.name, [this.name]);
+    } catch (e) {
+      console.error("error removing unique constraint", e);
+    }
+  }
+
+  /**
+   *
+   * @param {boolean} not_null
+   * @returns {Promise<void>}
+   */
+  async toggle_not_null(not_null: boolean): Promise<void> {
+    this.fill_table();
+
+    if (!this.table) {
+      throw new Error("To toggle a not null constraint, 'table' must be set.");
+    }
+    const schema = db.getTenantSchemaPrefix();
+    const qTable = `${schema}"${sqlsanitize(this.table.name)}"`;
+    const qCol = `"${sqlsanitize(this.name)}"`;
+    await db.query(
+      db.setColumnNullabilitySql(qTable, qCol, this.sql_type, not_null)
+    );
+  }
+
+  /**
+   * @param {object} new_field
+   * @returns {Promise<void>}
+   */
+  async alter_sql_type(new_field: Field) {
+    if (new_field.is_fkey && new_field?.reftable_name && !new_field.reftable) {
+      const refTable = Table.findOne(new_field?.reftable_name)!;
+      new_field.reftable = refTable;
+      new_field.reftype = refTable.pk_type.name;
+      new_field.refname = refTable.pk_name;
+    }
+    let new_sql_type = new_field.sql_type;
+    let def = "";
+    let using = `USING ("${sqlsanitize(this.name)}"::${
+      new_field.sql_bare_type
+    })`;
+
+    const schema = db.getTenantSchemaPrefix();
+    new_field.fill_table();
+    this.fill_table();
+    if (!this.table) {
+      throw new Error(
+        `To add the field '${new_field.name}', 'table' must be set.`
+      );
+    }
+    if (new_field.primary_key) {
+      if (instanceOfType(new_field.type)) {
+        if (new_field.type.primaryKey?.sql_type)
+          new_sql_type = new_field.type.primaryKey.sql_type;
+        if (new_field.type.primaryKey?.default_sql) {
+          def = `default ${new_field.type.primaryKey.default_sql}`;
+        }
+      }
+      if (db.text_requires_length_for_index && /\btext\b/i.test(new_sql_type))
+        new_sql_type = db.indexable_text_sql_type;
+      const qTable = `${schema}"${sqlsanitize(this.table.name)}"`;
+      const qCol = `"${sqlsanitize(this.name)}"`;
+      for (const stmt of db.changePkColumnTypeStatements(
+        qTable,
+        qCol,
+        new_sql_type,
+        def,
+        this.primary_key
+      ))
+        await db.query(stmt);
+    } else if (
+      new_field.is_fkey &&
+      !this.is_fkey &&
+      this.type &&
+      typeof this.type !== "string" &&
+      new_field.reftype === this?.type.name &&
+      new_field?.reftable_name
+    ) {
+      if (
+        db.text_requires_length_for_index &&
+        /\btext\b/i.test(new_field.sql_type)
+      )
+        await db.query(
+          db.alterColumnTypeSql(
+            `${schema}"${sqlsanitize(this.table.name)}"`,
+            `"${sqlsanitize(new_field.name)}"`,
+            db.indexable_text_sql_type,
+            "",
+            ""
+          )
+        );
+      await db.query(
+        `ALTER TABLE ${schema}"${sqlsanitize(
+          this.table.name
+        )}" add constraint "${sqlsanitize(
+          new_field!.table!.name
+        )}_${sqlsanitize(new_field.name)}_fkey" foreign key ("${sqlsanitize(
+          new_field.name
+        )}") references ${schema}"${sqlsanitize(new_field.reftable_name)}"("${new_field.refname || "id"}")${
+          new_field.on_delete_sql
+        }${db.fk_deferrable_clause}`
+      );
+    } else if (!new_field.is_fkey && this.is_fkey) {
+      const conName = `${sqlsanitize(new_field!.table!.name)}_${sqlsanitize(
+        new_field.name
+      )}_fkey`;
+      await db.dropForeignKeyIfExists(
+        `${schema}"${sqlsanitize(this.table.name)}"`,
+        conName
+      );
+    } else if (
+      new_field.is_fkey &&
+      this.reftable_name &&
+      new_field.reftable_name &&
+      (new_field.on_delete_sql !== this.on_delete_sql ||
+        new_field.reftable_name !== this.reftable_name)
+    ) {
+      //add or remove on delete cascade - https://stackoverflow.com/a/10356720
+      await db.replaceForeignKey({
+        qTable: `${schema}"${sqlsanitize(this.table.name)}"`,
+        oldConName: `${sqlsanitize(this.table.name)}_${sqlsanitize(
+          this.name
+        )}_fkey`,
+        newConName: `${sqlsanitize(new_field!.table!.name)}_${sqlsanitize(
+          new_field.name
+        )}_fkey`,
+        colName: sqlsanitize(new_field.name),
+        qRefTable: `${schema}"${sqlsanitize(new_field!.reftable_name)}"`,
+        refCol: new_field!.refname,
+        onDelete: new_field.on_delete_sql,
+      });
+    } else {
+      const qTable = `${schema}"${sqlsanitize(this.table.name)}"`;
+      const qCol = `"${sqlsanitize(this.name)}"`;
+      await db.query(
+        db.alterColumnTypeSql(qTable, qCol, new_sql_type, using, def)
+      );
+    }
+    //limited refresh if we do not have a client
+    if (!db.getRequestContext()?.client)
+      await nsState.getState()!.refresh_tables(true);
+  }
+
+  /**
+   * @returns {Promise<void>}
+   */
+  fill_table(): void {
+    if (!this.table) {
+      this.table = Table.findOne({ id: this.table_id });
+    }
+  }
+
+  // sets calc_joinfields attributes, will be read by
+  // Table.auto_update_calc_aggregations
+  async set_calc_joinfields() {
+    if (
+      !this.calculated ||
+      !this.stored ||
+      this.expression === "__aggregation" ||
+      !this.expression
+    )
+      return;
+    const joinFields = {};
+    const table = Table.findOne({ id: this.table_id });
+    if (!table) return;
+    const fields = table.getFields();
+    add_free_variables_to_joinfields(
+      freeVariables(this.expression),
+      joinFields,
+      fields
+    );
+    const calc_joinfields: Array<CalcJoinfield> = [];
+    Object.values(joinFields).forEach((jf: any) => {
+      if (!jf.rename_object) {
+        //half-h
+        if (jf.through) {
+          const myField = table.getField(jf.ref);
+          if (!myField) return;
+          const throughTable = Table.findOne({ name: myField.reftable_name });
+          if (!throughTable) return;
+          const throughField = throughTable.getField(jf.through);
+          if (!throughField) return;
+          const targetTable = Table.findOne({
+            name: throughField.reftable_name,
+          });
+          if (!targetTable) return;
+
+          calc_joinfields.push({
+            targetTable: targetTable.name,
+            field: myField.name,
+            through: [throughField.name],
+            throughTable: [throughTable.name],
+            targetField: jf.target,
+          });
+          calc_joinfields.push({
+            targetTable: throughTable.name,
+            field: myField.name,
+            targetField: jf.through,
+          });
+        } else {
+          const myField = table.getField(jf.ref);
+          if (!myField) return;
+          const targetTable = Table.findOne({ name: myField.reftable_name });
+          if (!targetTable) return;
+
+          calc_joinfields.push({
+            targetTable: targetTable.name,
+            field: myField.name,
+            targetField: jf.target,
+          });
+        }
+        return;
+      }
+      const path = [...jf.rename_object];
+      if (path.length === 2) {
+        const myField = table.getField(path[0]);
+        if (!myField) return;
+        const targetTable = Table.findOne({ name: myField.reftable_name });
+        if (!targetTable) return;
+
+        calc_joinfields.push({
+          targetTable: targetTable.name,
+          field: myField.name,
+          targetField: path[1],
+        });
+      } else if (path.length === 3) {
+        const myField = table.getField(path[0]);
+        if (!myField) return;
+        const throughTable = Table.findOne({ name: myField.reftable_name });
+        if (!throughTable) return;
+        const throughField = throughTable.getField(path[1]);
+        if (!throughField) return;
+        const targetTable = Table.findOne({ name: throughField.reftable_name });
+        if (!targetTable) return;
+
+        calc_joinfields.push({
+          targetTable: targetTable.name,
+          field: myField.name,
+          through: [throughField.name],
+          throughTable: [throughTable.name],
+          targetField: path[2],
+        });
+        calc_joinfields.push({
+          targetTable: throughTable.name,
+          field: myField.name,
+          targetField: path[1],
+        });
+      }
+    });
+    if (
+      JSON.stringify(calc_joinfields) !==
+      JSON.stringify(this.attributes?.calc_joinfields)
+    ) {
+      this.attributes.calc_joinfields = calc_joinfields;
+      await db.update("_sc_fields", { attributes: this.attributes }, this.id);
+    }
+  }
+
+  /**
+   * @param {object} v
+   * @returns {Promise<void>}
+   */
+  async update(v: Partial<Field> | Partial<FieldCfg>): Promise<void> {
+    const f = new Field({ ...this, ...v });
+    const state = nsState.getState()!;
+    const rename: boolean = f.name !== this.name;
+    if (rename) this.fill_table();
+    if (rename && !this.table?.name) {
+      throw new Error("No table to rename in");
+    }
+
+    if (
+      typeof v.is_unique !== "undefined" &&
+      !!v.is_unique !== !!this.is_unique
+    ) {
+      if (v.is_unique && !this.is_unique) await this.add_unique_constraint();
+      if (!v.is_unique && this.is_unique) await this.remove_unique_constraint();
+      await db.update("_sc_fields", { is_unique: v.is_unique }, this.id);
+    }
+    const schema = db.getTenantSchemaPrefix();
+
+    if (f.attributes.default !== this.attributes.default) {
+      const table = Table.findOne({ id: this.table_id })!;
+
+      if (
+        typeof f.attributes.default === "undefined" ||
+        f.attributes.default === null
+      ) {
+        if (db.supports_alter_table)
+          await db.query(
+            `alter table ${schema}"${sqlsanitize(
+              table!.name // ensured above
+            )}" alter column "${sqlsanitize(this.name)}" drop default;`
+          );
+      } else {
+        const q = `DROP FUNCTION IF EXISTS edit_field_${sqlsanitize(f.name)};
+        CREATE FUNCTION edit_field_${sqlsanitize(f.name)}(thedef ${
+          f.sql_bare_type
+        }) RETURNS void AS $$
+        BEGIN
+        EXECUTE format('alter table ${schema}"${sqlsanitize(
+          table.name
+        )}"alter column "${sqlsanitize(f.name)}" set default %L', thedef);
+        END;
+        $$ LANGUAGE plpgsql;`;
+        await db.query(q);
+        await db.query(`SELECT edit_field_${sqlsanitize(f.name)}($1)`, [
+          f.attributes.default,
+        ]);
+      }
+    }
+
+    if (typeof v.required !== "undefined" && !!v.required !== !!this.required)
+      await this.toggle_not_null(!!v.required);
+
+    if (
+      db.supports_alter_table &&
+      (f.sql_type !== this.sql_type || this.reftable_name !== f.reftable_name)
+    ) {
+      await this.alter_sql_type(f);
+    }
+    if (rename) {
+      await db.query(
+        `alter table ${schema}"${sqlsanitize(
+          this.table!.name // ensured above
+        )}" rename column "${sqlsanitize(this.name)}" TO "${f.name}";`
+      );
+    }
+    await db.update("_sc_fields", v, this.id);
+
+    Object.keys(v).forEach((k: string) => {
+      // @ts-ignore
+      if (k !== "type") this[k] = v[k];
+    });
+    if (
+      v.type &&
+      v.type !== (typeof this.type === "string" ? this.type : this.type?.name)
+    ) {
+      if (typeof v.type === "string" && state.types[v.type]) {
+        this.type = state.types[v.type];
+      }
+    }
+    await this.set_calc_joinfields();
+    //limited refresh if we do not have a client
+    if (!db.getRequestContext()?.client) await state.refresh_tables(true);
+  }
+
+  /**
+   * @type {string}
+   */
+  get listKey(): any {
+    if (instanceOfType(this.type))
+      if (this.type.listAs)
+        return (r: any) => (<Type>this.type).listAs!(r[this.name]);
+      else if (this.type.showAs)
+        return (r: any) => (<Type>this.type).showAs!(r[this.name]);
+    return this.name;
+  }
+
+  /**
+   * @type {object}
+   */
+  get presets(): { LoggedIn: ({ user }: { user: any }) => boolean } | null {
+    if (instanceOfType(this.type) && this.type.presets)
+      return this.type.presets;
+
+    if (this.type === "Key" && this.reftable_name === "users")
+      return { LoggedIn: ({ user }) => user && user.id };
+
+    return null;
+  }
+
+  /**
+   * @throws {InvalidAdminAction}
+   * @returns {Promise<void>}
+   */
+  async delete(): Promise<void> {
+    const table = Table.findOne({ id: this.table_id });
+    await TableConstraint.delete_field_constraints(table!, this);
+    if (table!.ownership_field_id === this.id) {
+      throw new InvalidAdminAction(
+        `Cannot delete field ${this.name} as it sets ownership for table ${table!.name}`
+      );
+    }
+
+    const schema = db.getTenantSchemaPrefix();
+
+    await db.deleteWhere("_sc_fields", { id: this.id });
+
+    if (!this.calculated || this.stored) {
+      if (!db.supports_alter_table && this.is_unique)
+        await this.remove_unique_constraint();
+      if (this.is_fkey && db.fk_must_be_dropped_before_column) {
+        try {
+          await db.query(
+            `alter table ${schema}"${sqlsanitize(
+              table!.name
+            )}" drop constraint "${sqlsanitize(table!.name)}_${sqlsanitize(
+              this.name
+            )}_fkey"`
+          );
+        } catch (e: any) {
+          console.error(
+            `Field.delete: could not drop fkey constraint for "${this.name}" on "${table!.name}"`,
+            e.message || e
+          );
+        }
+      }
+      try {
+        await db.query(
+          `alter table ${schema}"${sqlsanitize(
+            table!.name
+          )}" drop column "${sqlsanitize(this.name)}"`
+        );
+      } catch (e: any) {
+        // Column already absent — safe to ignore
+        console.error(
+          `Field.delete: column "${this.name}" already absent from "${table!.name}"`,
+          e.message || e
+        );
+      }
+      if (table!.versioned) {
+        try {
+          await db.query(
+            `alter table ${schema}"${sqlsanitize(
+              table!.name
+            )}__history" drop column "${sqlsanitize(this.name)}"`
+          );
+        } catch (e: any) {
+          console.error(
+            `Field.delete: column "${this.name}" already absent from "${table!.name}__history"`,
+            e.message || e
+          );
+        }
+      }
+    }
+    if (!db.getRequestContext()?.client)
+      await nsState.getState()!.refresh_tables(true);
+  }
+
+  /**
+   * @param {object} table
+   * @returns {Promise<void>}
+   */
+  async enable_fkey_constraint(table: Table) {
+    if (this.is_fkey && db.supports_alter_table) {
+      if (!this.reftable_name) {
+        throw new Error(
+          "To enable a foreign key constraint, the 'reftable_name' must be set."
+        );
+      }
+      const schema = db.getTenantSchemaPrefix();
+
+      const q = `alter table ${schema}"${sqlsanitize(
+        table.name
+      )}" ADD CONSTRAINT "${sqlsanitize(table.name)}_${sqlsanitize(
+        this.name
+      )}_fkey" FOREIGN KEY ("${sqlsanitize(
+        this.name
+      )}") references ${schema}"${sqlsanitize(this.reftable_name)}" ("${this.refname}")${
+        this.on_delete_sql
+      }${db.fk_deferrable_clause}`;
+      try {
+        await db.query(q);
+      } catch (e: any) {
+        if (db.isDuplicateForeignKeyError(e)) return;
+        throw e;
+      }
+    }
+  }
+
+  /**
+   * @param fld
+   * @param bare
+   * @param id - optional id, if set, no '_sc_fields' entry is inserted
+   * @returns
+   */
+  static async create(
+    fld: Field | FieldCfg,
+    bare: boolean = false,
+    id?: string
+  ): Promise<Field> {
+    const f = new Field(fld);
+    const schema = db.getTenantSchemaPrefix();
+
+    // engine-specific ADD COLUMN DDL (sqlite/mysql/postgres branches below)
+    const is_sqlite = db.isSQLite;
+    //const tables = await Table.find();
+    //console.log({ tables, fld });
+    if (f.is_fkey) {
+      //need to check ref types
+      const reftable = Table.findOne({ name: f.reftable_name });
+      if (reftable) {
+        const reffields = await reftable.getFields();
+        const refpk = reffields.find((rf: Field) => rf.primary_key);
+        f.reftype = refpk!.type_name;
+        f.refname = refpk!.name;
+      }
+    }
+
+    const sql_type = bare ? f.sql_bare_type : f.sql_type;
+    const table = fld.table || Table.findOne({ id: f.table_id });
+    if (
+      !f.calculated &&
+      typeof f.attributes.default === "undefined" &&
+      f.attributes.default_expression &&
+      !db.isSQLite
+    ) {
+      try {
+        const exprFn = get_async_expression_function(
+          f.attributes.default_expression,
+          [],
+          {}
+        );
+        const evaluated = await exprFn({}, null);
+        if (evaluated != null) f.attributes.default = evaluated;
+      } catch (_e) {
+        // expression may need user context; proceed without SQL default
+      }
+    }
+    if (!f.calculated || f.stored) {
+      if (typeof f.attributes.default === "undefined") {
+        const q = `alter table ${schema}"${sqlsanitize(
+          table!.name
+        )}" add column "${sqlsanitize(f.name)}" ${sql_type} ${
+          f.required ? `not null ${is_sqlite ? 'default ""' : ""}` : ""
+        }`;
+        await db.query(q);
+      } else if (is_sqlite) {
+        //warning: not safe but for sqlite we don't care
+        const q = `alter table ${schema}"${sqlsanitize(
+          table!.name
+        )}" add column "${sqlsanitize(f.name)}" ${sql_type} ${
+          f.required
+            ? `not null default ${JSON.stringify(f.attributes.default)}`
+            : ""
+        }`;
+        await db.query(q);
+      } else {
+        await db.addColumnWithDefault({
+          qTable: `${schema}"${sqlsanitize(table!.name)}"`,
+          colName: f.name,
+          sqlType: sql_type,
+          bareType: f.sql_bare_type,
+          required: f.required,
+          defaultValue: f.attributes.default,
+        });
+      }
+      if (f.is_fkey && !db.inline_fk_in_column_type) {
+        const reftable = Table.findOne({ name: f.reftable_name });
+        if (reftable && !reftable.external && !reftable.provider_name)
+          await f.enable_fkey_constraint(table! as Table);
+      }
+    }
+    f.id = id
+      ? id
+      : await db.insert("_sc_fields", {
+          table_id: f.table_id,
+          name: f.name,
+          label: f.label,
+          type: f.is_fkey || f.type === "File" ? f.type : (<Type>f.type)?.name,
+          reftable_name: f.is_fkey ? f.reftable_name : undefined,
+          reftype: f.is_fkey ? f.reftype : undefined,
+          refname: f.is_fkey ? f.refname : undefined,
+          required: f.required,
+          is_unique: f.is_unique,
+          attributes: f.attributes,
+          calculated: f.calculated,
+          expression: f.expression,
+          stored: f.stored,
+          description: f.description,
+        });
+
+    if (
+      isNode() &&
+      (table! as Table).versioned &&
+      !(f.calculated && !f.stored)
+    ) {
+      await db.query(
+        `alter table ${schema}"${sqlsanitize(
+          table!.name
+        )}__history" add column "${sqlsanitize(f.name)}" ${f.sql_bare_type}`
+      );
+    }
+
+    if (f.is_unique && !f.calculated) await f.add_unique_constraint();
+    await f.set_calc_joinfields();
+    let refreshed = false;
+    //limited refresh if we do not have a client
+    if (!db.getRequestContext()?.client) {
+      refreshed = true;
+      await nsState.getState()!.refresh_tables(true);
+    }
+    if (fld.table && fld.table.fields) {
+      fld.table.fields.push(f);
+    }
+    if (f.calculated && f.stored) {
+      const nrows = await (table! as Table).countRows({});
+      if (nrows > 0 && nrows <= 20) {
+        if (!refreshed) await nsState.getState()!.refresh_tables(true);
+        const table1 = Table.findOne({ id: f.table_id })!;
+        await recalculate_for_stored(table1);
+      } else if (nrows > 0) {
+        //intentionally omit await
+        //not waiting as there could be a lot of data
+        db.whenTransactionisFree(async () => {
+          const table1 = Table.findOne({ id: f.table_id })!;
+
+          await recalculate_for_stored(table1);
+        });
+      }
+    }
+
+    return f;
+  }
+
+  /**
+   * @param {function|object[]} [typeattribs]
+   * @param {number} [table_id]
+   * @returns {*}
+   */
+  static getTypeAttributes(typeattribs: Function | any, table_id?: number) {
+    if (!typeattribs) return [];
+    if (typeof typeattribs === "function") {
+      if (!table_id) return typeattribs({});
+      const table = Table.findOne({ id: table_id })!;
+      return typeattribs({ table });
+    } else return typeattribs;
+  }
+}
+
+export default Field;

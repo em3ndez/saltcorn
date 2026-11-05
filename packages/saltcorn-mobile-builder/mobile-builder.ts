@@ -1,0 +1,511 @@
+const { PluginManager } = require("live-plugin-manager");
+import { join, basename } from "path";
+import { copySync, rmSync } from "fs-extra";
+import Plugin from "@saltcorn/data/models/plugin";
+import File from "@saltcorn/data/models/file";
+import {
+  buildTablesFile,
+  fetchRemoteAppBundle,
+  copySiteLogo,
+  copyServerFiles,
+  copyTranslationFiles,
+  createSqliteDb,
+  writeCfgFile,
+  prepareSplashPage,
+  prepareBuildDir,
+  zipDirectory,
+  prepareExportOptionsPlist,
+  copyShareExtFiles,
+  modifyShareViewController,
+  createShareExtensionTarget,
+  writeCapacitorConfig,
+  prepAppIcon,
+  modifyInfoPlist,
+  writeEntitlementsPlist,
+  injectCodeSignEntitlements,
+  writePodfile,
+  modifyXcodeProjectFile,
+  writePrivacyInfo,
+  modifyAndroidManifest,
+  writeDataExtractionRules,
+  writeNetworkSecurityConfig,
+  modifyGradleConfig,
+  hasAuthMethod,
+  modifyAppDelegate,
+} from "./utils/common-build-utils";
+import {
+  bundlePackagesAndPlugins,
+  copyPublicDirs,
+  copyPluginMobileAppDirs,
+  bundleMobileAppCode,
+  copyOptionalSource,
+} from "./utils/package-bundle-utils";
+import User from "@saltcorn/data/models/user";
+import { CapacitorHelper } from "./utils/capacitor-helper";
+import { removeNonWordChars } from "@saltcorn/data/utils";
+const { getState } = require("@saltcorn/data/db/state");
+
+type EntryPointType = "view" | "page" | "byrole";
+const appIdDefault = "saltcorn.mobile.app";
+const appNameDefault = "SaltcornMobileApp";
+
+export type IosCfg = {
+  noProvisioningProfile?: boolean;
+  appleTeamId?: string;
+  // whether the main provisioning profile is Ad Hoc rather than App Store
+  isAdHoc?: boolean;
+  mainProvisioningProfile?: {
+    guuid: string;
+  };
+  shareExtensionProvisioningProfile?: {
+    guuid: string;
+    specifier: string;
+    identifier: string;
+    appGroupId?: string;
+  };
+};
+
+type MobileBuilderConfig = {
+  appName?: string;
+  appId?: string;
+  appVersion?: string;
+  appIcon?: string;
+  templateDir: string;
+  buildDir: string;
+  cliDir: string;
+  useDocker?: boolean;
+  platforms: string[];
+  synchedTables?: string[];
+  includedPlugins?: string[];
+  entryPoint: string;
+  entryPointType: EntryPointType;
+  serverURL: string;
+  splashPage?: string;
+  autoPublicLogin: string;
+  showContinueAsPublicUser?: boolean;
+  allowOfflineMode: string;
+  syncOnReconnect: boolean;
+  syncOnAppResume: boolean;
+  pushSync: boolean;
+  syncInterval?: number;
+  pushSyncHeartbeatInterval?: number;
+  plugins: Plugin[];
+  copyTargetDir?: string;
+  user?: User;
+  iosParams?: IosCfg;
+  allowShareTo?: boolean;
+  tenantAppName?: string;
+  keyStorePath?: string;
+  keyStoreAlias?: string;
+  keyStorePassword?: string;
+  googleServicesFile?: string;
+  buildType: "debug" | "release";
+  remoteSchemaUrl?: string;
+  remoteApiKey?: string;
+  remotePushNotificationsEnabled?: boolean;
+};
+
+/**
+ *
+ */
+export class MobileBuilder {
+  appName: string;
+  appId: string;
+  appVersion: string;
+  appIcon?: string;
+  templateDir: string;
+  buildDir: string;
+  cliDir: string;
+  useDocker?: boolean;
+  platforms: string[];
+  synchedTables: string[];
+  includedPlugins: string[];
+  entryPoint: string;
+  entryPointType: EntryPointType;
+  serverURL: string;
+  splashPage?: string;
+  autoPublicLogin: string;
+  showContinueAsPublicUser: boolean;
+  allowOfflineMode: string;
+  syncOnReconnect: boolean;
+  syncOnAppResume: boolean;
+  pushSync: boolean;
+  syncInterval?: number;
+  pushSyncHeartbeatInterval?: number;
+  backgroundSyncEnabled: boolean;
+  backgroundFetchEnabled: boolean;
+  pluginManager: any;
+  plugins: Plugin[];
+  packageRoot = join(__dirname, "../");
+  copyTargetDir?: string;
+  user?: User;
+  allowShareTo: boolean;
+  tenantAppName?: string;
+  keyStorePath: string;
+  keyStoreAlias: string;
+  keyStorePassword: string;
+  isUnsecureKeyStore: boolean;
+  googleServicesFile?: string;
+  buildType: "debug" | "release";
+  remoteSchemaUrl?: string;
+  remoteApiKey?: string;
+  iosParams?: IosCfg;
+  apnsKeyId?: string;
+  pushNotificationsEnabled: boolean;
+
+  private capacitorHelper: CapacitorHelper;
+
+  /**
+   *
+   * @param cfg
+   */
+  constructor(cfg: MobileBuilderConfig) {
+    this.appName = cfg.appName || appNameDefault;
+    if (cfg.appId) this.appId = cfg.appId;
+    else if (cfg.appName && cfg.appName !== appNameDefault)
+      this.appId = `${removeNonWordChars(cfg.appName)}.mobile.app`;
+    else this.appId = appIdDefault;
+    this.appVersion = cfg.appVersion || "0.0.1";
+    this.appIcon = cfg.appIcon;
+    this.templateDir = cfg.templateDir;
+    this.buildDir = cfg.buildDir;
+    this.cliDir = cfg.cliDir;
+    this.useDocker = cfg.useDocker;
+    this.platforms = cfg.platforms;
+    this.synchedTables = cfg.synchedTables ? cfg.synchedTables : [];
+    this.includedPlugins = cfg.includedPlugins ? cfg.includedPlugins : [];
+    this.entryPoint = cfg.entryPoint;
+    this.entryPointType = cfg.entryPointType;
+    this.serverURL = cfg.serverURL;
+    this.splashPage = cfg.splashPage;
+    this.autoPublicLogin = cfg.autoPublicLogin;
+    this.showContinueAsPublicUser = !!cfg.showContinueAsPublicUser;
+    this.allowOfflineMode = cfg.allowOfflineMode;
+    this.pushSync = cfg.pushSync;
+    this.syncOnReconnect = cfg.syncOnReconnect;
+    this.syncOnAppResume = cfg.syncOnAppResume;
+    this.syncInterval = cfg.syncInterval ? +cfg.syncInterval : undefined;
+    this.pushSyncHeartbeatInterval = cfg.pushSyncHeartbeatInterval
+      ? +cfg.pushSyncHeartbeatInterval
+      : undefined;
+    this.backgroundSyncEnabled = !!this.syncInterval && this.syncInterval > 0;
+    this.backgroundFetchEnabled =
+      this.backgroundSyncEnabled ||
+      (!!this.pushSyncHeartbeatInterval && this.pushSyncHeartbeatInterval > 0);
+    this.pluginManager = new PluginManager({
+      pluginsPath: join(this.buildDir, "plugin_packages", "node_modules"),
+    });
+    this.plugins = cfg.plugins;
+    this.copyTargetDir = cfg.copyTargetDir;
+    this.user = cfg.user;
+    this.allowShareTo = cfg.allowShareTo || false;
+    this.tenantAppName = cfg.tenantAppName;
+    if (cfg.keyStorePath && cfg.keyStoreAlias && cfg.keyStorePassword) {
+      this.keyStorePath = cfg.keyStorePath;
+      this.keyStoreAlias = cfg.keyStoreAlias;
+      this.keyStorePassword = cfg.keyStorePassword;
+      this.isUnsecureKeyStore = false;
+    } else {
+      this.keyStorePath = join(this.buildDir, "unsecure-default-key.jks");
+      this.keyStoreAlias = "unsecure-default-alias";
+      this.keyStorePassword = "unsecurepassw";
+      this.isUnsecureKeyStore = true;
+    }
+    this.googleServicesFile = cfg.googleServicesFile;
+    this.buildType = cfg.buildType;
+    this.remoteSchemaUrl = cfg.remoteSchemaUrl;
+    this.remoteApiKey = cfg.remoteApiKey;
+    this.iosParams = cfg.iosParams;
+    this.capacitorHelper = new CapacitorHelper({
+      ...this,
+      appVersion: this.appVersion,
+    });
+    // remote: "remote" is just a truthy placeholder, never read as a value
+    this.apnsKeyId = this.remoteSchemaUrl
+      ? cfg.remotePushNotificationsEnabled
+        ? "remote"
+        : undefined
+      : getState().getConfig("apn_signing_key_id");
+    this.pushNotificationsEnabled =
+      !!this.googleServicesFile || !!this.apnsKeyId;
+  }
+
+  /**
+   * Builds the mobile app: sets up the project directory, copies in the
+   * app's code and assets, and produces the Android/iOS build in one pass.
+   */
+  public async build() {
+    try {
+      await Plugin.loadAllPlugins();
+      prepareBuildDir(
+        this.buildDir,
+        this.templateDir,
+        this.pushNotificationsEnabled,
+        this.backgroundFetchEnabled,
+        this.pushSync
+      );
+      writeCapacitorConfig(this.buildDir, {
+        appName: this.appName,
+        appId: this.appId !== appIdDefault ? this.appId : undefined,
+        appVersion: this.appVersion,
+        keystorePath: this.keyStorePath,
+        keystoreAlias: this.keyStoreAlias,
+        keystorePassword: this.keyStorePassword,
+        keystoreAliasPassword: this.keyStorePassword,
+        buildType: this.buildType,
+      });
+      this.capacitorHelper.addPlatforms();
+      if (this.appIcon) prepAppIcon(this.buildDir, this.appIcon);
+
+      let resultCode: number | null;
+      if (this.remoteSchemaUrl) {
+        // saltcorn stuff is prepared/zipped remotely - only Capacitor/native work here
+        await fetchRemoteAppBundle(
+          this.buildDir,
+          this.remoteSchemaUrl,
+          this.remoteApiKey,
+          {
+            includedPlugins: this.includedPlugins,
+            platforms: this.platforms,
+            synchedTables: this.synchedTables,
+            entryPoint: this.entryPoint,
+            entryPointType: this.entryPointType,
+            serverURL: this.serverURL,
+            splashPage: this.splashPage,
+            tenantAppName: this.tenantAppName,
+            buildType: this.buildType,
+            autoPublicLogin: this.autoPublicLogin,
+            showContinueAsPublicUser: this.showContinueAsPublicUser,
+            allowOfflineMode: this.allowOfflineMode,
+            syncOnReconnect: this.syncOnReconnect,
+            syncOnAppResume: this.syncOnAppResume,
+            pushSync: this.pushSync,
+            syncInterval: this.syncInterval,
+            pushSyncHeartbeatInterval: this.pushSyncHeartbeatInterval,
+          }
+        );
+        resultCode = 0;
+      } else {
+        resultCode = await this.prepareAppContent();
+        if (resultCode !== 0) return resultCode;
+      }
+
+      if (this.platforms.includes("ios")) await this.handleIosPlatform();
+      if (this.platforms.includes("android"))
+        await this.handleAndroidPlatform();
+      if (this.platforms.find((p) => p === "ios" || p === "android")) {
+        this.capacitorHelper.generateAssets();
+        await this.capacitorHelper.buildApp();
+      }
+      if (resultCode === 0 && this.copyTargetDir) {
+        this.capacitorHelper.tryCopyAppFiles(
+          this.copyTargetDir,
+          this.user!,
+          this.appName
+        );
+      }
+      return resultCode;
+    } catch (e: any) {
+      console.error(e);
+      return 1;
+    }
+  }
+
+  /**
+   * Everything saltcorn-specific that goes into buildDir/www: server
+   * assets, site logo, translations, cfg file, plugin bundles, app code,
+   * public dirs, schema data, splash page, sqlite db. Runs locally for a
+   * normal build, or on the remote server for prepareRemoteBundle.
+   */
+  private async prepareAppContent(): Promise<number | null> {
+    copyServerFiles(this.buildDir);
+    await copySiteLogo(this.buildDir);
+    copyTranslationFiles(this.buildDir);
+    writeCfgFile({
+      buildDir: this.buildDir,
+      entryPoint: this.entryPoint,
+      entryPointType: this.entryPointType,
+      serverPath: this.serverURL,
+      synchedTables: this.synchedTables,
+      tenantAppName: this.tenantAppName,
+      autoPublicLogin: this.autoPublicLogin,
+      showContinueAsPublicUser: this.showContinueAsPublicUser,
+      allowOfflineMode: this.allowOfflineMode,
+      syncOnReconnect: this.syncOnReconnect,
+      syncOnAppResume: this.syncOnAppResume,
+      pushSync: this.pushSync,
+      syncInterval: this.syncInterval ? this.syncInterval : 0,
+      pushSyncHeartbeatInterval: this.pushSyncHeartbeatInterval
+        ? this.pushSyncHeartbeatInterval
+        : 0,
+      allowShareTo: this.allowShareTo,
+      apnsEnvironment:
+        this.buildType === "debug" ? "development" : "production",
+    });
+    let resultCode = await bundlePackagesAndPlugins(
+      this.buildDir,
+      this.plugins
+    );
+    if (resultCode !== 0) return resultCode;
+    copyPluginMobileAppDirs(this.buildDir);
+    if (this.pushNotificationsEnabled || this.pushSync) {
+      copyOptionalSource(this.buildDir, "notifications.js");
+      if (this.pushSync && this.platforms.includes("ios"))
+        copyOptionalSource(this.buildDir, "ios_silent_push.js");
+    }
+    if (
+      (this.syncInterval && this.syncInterval > 0) ||
+      (this.pushSyncHeartbeatInterval && this.pushSyncHeartbeatInterval > 0)
+    )
+      copyOptionalSource(this.buildDir, "background.js");
+    resultCode = bundleMobileAppCode(this.buildDir);
+    if (resultCode !== 0) return resultCode;
+    await copyPublicDirs(this.buildDir);
+    await buildTablesFile(this.buildDir, this.includedPlugins);
+    if (this.splashPage)
+      await prepareSplashPage(
+        this.buildDir,
+        this.splashPage,
+        this.serverURL,
+        this.tenantAppName,
+        this.user
+      );
+    return await createSqliteDb(this.buildDir);
+  }
+
+  /**
+   * Preps buildDir/www server-side and zips it - no native/Capacitor commands run here.
+   * @param outputZipPath path of the zip file to write
+   */
+  public async prepareRemoteBundle(
+    outputZipPath: string
+  ): Promise<number | null> {
+    try {
+      await Plugin.loadAllPlugins();
+      prepareBuildDir(
+        this.buildDir,
+        this.templateDir,
+        this.pushNotificationsEnabled,
+        this.backgroundFetchEnabled,
+        this.pushSync,
+        false
+      );
+      const resultCode = await this.prepareAppContent();
+      if (resultCode !== 0) return resultCode;
+      await zipDirectory(join(this.buildDir, "www"), outputZipPath);
+      return 0;
+    } catch (e: any) {
+      console.error(e);
+      return 1;
+    } finally {
+      rmSync(this.buildDir, { recursive: true, force: true });
+    }
+  }
+
+  private async handleIosPlatform() {
+    if (this.allowShareTo) {
+      copyShareExtFiles(this.buildDir);
+      if (this.iosParams?.shareExtensionProvisioningProfile?.appGroupId)
+        modifyShareViewController(
+          this.buildDir,
+          this.iosParams?.shareExtensionProvisioningProfile?.appGroupId
+        );
+      // adds the share-ext target to App.xcodeproj - has to run before
+      // modifyXcodeProjectFile, which patches signing settings for a
+      // target it expects to already exist
+      createShareExtensionTarget(
+        this.buildDir,
+        this.appId,
+        this.iosParams?.shareExtensionProvisioningProfile?.appGroupId
+      );
+    }
+    if (this.iosParams?.noProvisioningProfile !== true) {
+      prepareExportOptionsPlist({
+        buildDir: this.buildDir,
+        appId: this.appId,
+        iosParams: this.iosParams,
+      });
+      modifyXcodeProjectFile(this.buildDir, this.appVersion, this.iosParams!);
+    }
+    writePodfile(
+      this.buildDir,
+      !!this.apnsKeyId,
+      (!!this.syncInterval && this.syncInterval > 0) ||
+        (!!this.pushSyncHeartbeatInterval &&
+          this.pushSyncHeartbeatInterval > 0),
+      this.pushSync
+    );
+    writePrivacyInfo(this.buildDir, this.backgroundFetchEnabled);
+    modifyInfoPlist(
+      this.buildDir,
+      this.allowShareTo,
+      this.backgroundSyncEnabled,
+      this.pushSync,
+      this.backgroundFetchEnabled,
+      this.serverURL
+    );
+    // needed for push, or for share-to file uploads via the app group
+    const appGroupId =
+      this.iosParams?.shareExtensionProvisioningProfile?.appGroupId;
+    if (this.pushSync || (this.allowShareTo && appGroupId)) {
+      writeEntitlementsPlist(
+        this.buildDir,
+        this.buildType,
+        this.pushSync,
+        appGroupId
+      );
+      injectCodeSignEntitlements(this.buildDir);
+    }
+    modifyAppDelegate(
+      this.buildDir,
+      this.pushSync,
+      this.allowShareTo,
+      this.backgroundFetchEnabled
+    );
+  }
+
+  private async handleAndroidPlatform() {
+    if (!this.isUnsecureKeyStore) {
+      copySync(
+        this.keyStorePath,
+        join(this.buildDir, basename(this.keyStorePath))
+      );
+    }
+
+    if (this.googleServicesFile) {
+      const dest = join(
+        this.buildDir,
+        "android",
+        "app",
+        "google-services.json"
+      );
+      const servicesFile = await File.findOne(this.googleServicesFile);
+      if (servicesFile) copySync(servicesFile.location, dest);
+    }
+
+    await modifyAndroidManifest(
+      this.buildDir,
+      this.allowShareTo,
+      !!this.googleServicesFile,
+      hasAuthMethod(this.includedPlugins)
+    );
+    writeDataExtractionRules(this.buildDir);
+    writeNetworkSecurityConfig(this.buildDir);
+    modifyGradleConfig(
+      this.buildDir,
+      this.appVersion,
+      this.buildType === "debug"
+        ? {
+            keystorePath: this.useDocker
+              ? this.isUnsecureKeyStore
+                ? "/saltcorn-mobile-app/unsecure-default-key.jks"
+                : join("/", "saltcorn-mobile-app", basename(this.keyStorePath))
+              : this.keyStorePath,
+            keystorePassword: this.keyStorePassword,
+            keyAlias: this.keyStoreAlias,
+            keyPassword: this.keyStorePassword,
+          }
+        : undefined
+    );
+  }
+}

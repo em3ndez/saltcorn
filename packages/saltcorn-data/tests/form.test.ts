@@ -1,0 +1,351 @@
+import Table from "../models/table.js";
+import Field from "../models/field.js";
+import FieldRepeat from "../models/fieldrepeat.js";
+import Form from "../models/form.js";
+import markup from "@saltcorn/markup/index";
+import { getState } from "../db/state.js";
+import basePluginMod from "../base-plugin/index.js";
+const { renderForm } = markup;
+import { assertIsErrorsMsg } from "./assertions.js";
+import { describe, it, expect } from "@saltcorn/db-common/test_expect";
+
+getState()!.registerPlugin("base", basePluginMod);
+
+const mkRepForm = () =>
+  new Form({
+    action: "/",
+    fields: [
+      new Field({
+        name: "subject",
+        label: "Subject",
+        type: "String",
+      }),
+      new FieldRepeat({
+        name: "students",
+        fields: [
+          new Field({
+            name: "name",
+            label: "Name",
+            type: "String",
+          }),
+          new Field({
+            name: "age",
+            label: "Age",
+            type: "Integer",
+            attributes: { min: 16 },
+          }),
+        ],
+      }),
+    ],
+  });
+
+const mkNestedRepForm = () =>
+  new Form({
+    action: "/",
+    fields: [
+      new Field({
+        name: "subject",
+        label: "Subject",
+        type: "String",
+      }),
+      new FieldRepeat({
+        name: "students",
+        fields: [
+          new Field({
+            name: "name",
+            label: "Name",
+            type: "String",
+          }),
+          new Field({
+            name: "age",
+            label: "Age",
+            type: "Integer",
+            attributes: { min: 16 },
+          }),
+          new FieldRepeat({
+            name: "pets",
+            fields: [
+              new Field({
+                name: "name",
+                label: "Name",
+                type: "String",
+              }),
+              {
+                name: "species",
+                label: "Species",
+                type: "String",
+              },
+            ],
+          }),
+        ],
+      }),
+    ],
+  });
+
+describe("Form", () => {
+  it("should render", async () => {
+    const form = new Form({
+      action: "/",
+      fields: [
+        new Field({
+          name: "age",
+          label: "Age",
+          type: "Integer",
+          attributes: { min: 16 },
+        }),
+      ],
+    });
+    const html = renderForm(form, "");
+    form.validate({ age: 32 });
+    expect(html.includes("<form")).toBe(true);
+    expect(html.includes('min="16"')).toBe(true);
+    expect(form.values.age).toBe(32);
+  });
+
+  it("should render with repeats", async () => {
+    const form = mkRepForm();
+    const html = renderForm(form, "");
+    form.validate({
+      subject: "Maths",
+      age_0: 18,
+      name_0: "Fred",
+      age_1: 19,
+      name_1: "George",
+    });
+    expect(html.includes("<form")).toBe(true);
+    expect(html.includes('name="age_0"')).toBe(true);
+    expect(form.values.subject).toBe("Maths");
+    expect(form.values.students.length).toBe(2);
+    expect(form.values.students[0].name).toBe("Fred");
+    expect(form.values.students[1].age).toBe(19);
+  });
+
+  it("should render nested with repeats", async () => {
+    const form = mkNestedRepForm();
+    const html = renderForm(form, "");
+    form.validate({
+      subject: "Maths",
+      age_0: 18,
+      name_0: "Fred",
+      age_1: 19,
+      name_1: "George",
+      name_0_0: "Doggy",
+      species_0_0: "Cat",
+      name_0_1: "Wila",
+      species_0_1: "Tarantula",
+    });
+    expect(html.includes("<form")).toBe(true);
+    expect(html.includes('name="age_0"')).toBe(true);
+    expect(form.values.subject).toBe("Maths");
+    expect(form.values.students.length).toBe(2);
+    expect(form.values.students[0].name).toBe("Fred");
+    expect(form.values.students[1].age).toBe(19);
+    expect(form.values.students[0].pets.length).toBe(2);
+    expect(form.values.students[0].pets[0].name).toBe("Doggy");
+    expect(form.values.students[0].pets[1].name).toBe("Wila");
+  });
+  it("should render with repeats and values", async () => {
+    const form = mkRepForm();
+
+    form.values = {
+      subject: "Maths",
+      students: [
+        { name: "Fred", age: 18 },
+        { name: "George", age: 19 },
+      ],
+    };
+    const html = renderForm(form, "");
+    expect(html.includes("<form")).toBe(true);
+    expect(html.includes('name="age_0"')).toBe(true);
+    expect(html.includes('name="name_1"')).toBe(true);
+    expect(html.includes("Fred")).toBe(true);
+    expect(html.includes("George")).toBe(true);
+  });
+  it("should run form validator", async () => {
+    const form = new Form({
+      action: "/",
+      validator({ age }) {
+        if (age < 18) return "Should be older than 18";
+      },
+      fields: [
+        new Field({
+          name: "age",
+          label: "Age",
+          type: "Integer",
+          attributes: { min: 16 },
+        }),
+      ],
+    });
+    const vres = form.validate({ age: 15 });
+    assertIsErrorsMsg(vres);
+    expect(vres.errors).toEqual({ age: "Must be 16 or higher" });
+
+    const vres1 = form.validate({ age: 17 });
+    assertIsErrorsMsg(vres1);
+    expect(vres1.errors).toEqual({ _form: "Should be older than 18" });
+  });
+});
+
+describe("Bool Form", () => {
+  it("validates", async () => {
+    const form = new Form({
+      action: "/",
+      fields: [
+        new Field({
+          name: "done",
+          label: "Done",
+          type: "Bool",
+        }),
+      ],
+    });
+    form.validate({ done: "off" });
+    expect(form.values.done).toBe(false);
+    form.validate({});
+    expect(typeof form.values.done).toBe("boolean");
+    expect(form.values.done).toBe(false);
+    form.validate({ done: "on" });
+    expect(form.values.done).toBe(true);
+  });
+});
+describe("Form missing values", () => {
+  it("validates missing strings", async () => {
+    const form = new Form({
+      action: "/",
+      fields: [
+        new Field({
+          name: "name",
+          label: "Name",
+          type: "String",
+        }),
+      ],
+    });
+    form.values = {};
+    form.validate({ name: "Sam" });
+    expect(form.values.name).toBe("Sam");
+    form.values = {};
+    form.validate({ name: "" });
+    expect(form.values.name).toBe("");
+    form.values = {};
+    form.validate({});
+    expect(form.values.name).toBeUndefined();
+    expect(form.hasErrors).toBe(false);
+  });
+  it("errors on required strings", async () => {
+    const form = new Form({
+      action: "/",
+      fields: [
+        new Field({
+          name: "name",
+          label: "Name",
+          type: "String",
+          required: true,
+        }),
+      ],
+    });
+    form.values = {};
+    form.validate({ name: "Sam" });
+    expect(form.values.name).toBe("Sam");
+    form.values = {};
+    form.validate({ name: "" });
+    expect(form.values.name).toBe("");
+    expect(form.hasErrors).toBe(false);
+    form.values = {};
+    form.validate({});
+    expect(form.values.name).toBeUndefined();
+    expect(form.hasErrors).toBe(true);
+    expect(form.errors).toStrictEqual({ name: "Unable to read String" });
+  });
+  it("validates missing integers", async () => {
+    const form = new Form({
+      action: "/",
+      fields: [
+        new Field({
+          name: "name",
+          label: "Name",
+          type: "Integer",
+        }),
+      ],
+    });
+    form.values = {};
+    form.validate({ name: "5" });
+    expect(form.values.name).toBe(5);
+    form.values = {};
+    form.validate({ name: "" });
+    expect(form.values.name).toBe(null);
+    form.values = {};
+    form.validate({});
+    expect(form.values.name).toBeUndefined();
+  });
+});
+
+describe("parent field", () => {
+  it("validates", async () => {
+    const form = new Form({
+      action: "/",
+      fields: [
+        new Field({
+          name: "age",
+          label: "Age",
+          parent_field: "person",
+          type: "Integer",
+        }),
+      ],
+    });
+    const html = renderForm(form, "");
+    expect(html.includes("<form")).toBe(true);
+    expect(html.includes('name="person_age"')).toBe(true);
+    form.validate({ person_age: 16 });
+    expect(form.values.age).toBe(undefined);
+    expect(!!form.values.person).toBe(true);
+    expect(form.values.person.age).toBe(16);
+  });
+});
+
+describe("String form with validator failure ", () => {
+  it("validates", async () => {
+    const form = new Form({
+      action: "/",
+      fields: [
+        new Field({
+          name: "name",
+          label: "Name",
+          type: "String",
+          validator(s) {
+            if (s?.length < 3) return "Too short";
+          },
+        }),
+      ],
+    });
+    const html = renderForm(form, "");
+    expect(html.includes("<form")).toBe(true);
+    form.validate({ name: "Si" });
+    expect(form.errors).toStrictEqual({ name: "Too short" });
+    expect(form.values).toStrictEqual({ name: "Si" });
+    expect(form.hasErrors).toBe(true);
+  });
+});
+
+describe("String form with validator success", () => {
+  it("validates", async () => {
+    const form = new Form({
+      action: "/",
+      fields: [
+        new Field({
+          name: "name",
+          label: "Name",
+          type: "String",
+          validator(s) {
+            if (s?.length < 3) return "Too short";
+          },
+        }),
+      ],
+    });
+    const html = renderForm(form, "");
+    expect(html.includes("<form")).toBe(true);
+
+    form.validate({ name: "Simon" });
+    expect(form.values.name).toBe("Simon");
+    expect(form.errors).toStrictEqual({});
+    expect(form.hasErrors).toBe(false);
+  });
+});

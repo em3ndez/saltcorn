@@ -1,0 +1,1175 @@
+/**
+ * View Data Access Layer
+ * @category saltcorn-data
+ * @module models/view
+ * @subcategory models
+ */
+
+import { getState } from "../db/state.js";
+import Page from "../models/page.js";
+import Workflow from "../models/workflow.js";
+import tableMod from "./table.js";
+import * as nsState from "../db/state.js";
+import db from "../db/index.js";
+//import Form from "./form.js";
+import {
+  removeEmptyStrings,
+  removeEmptyStringsKeepNull,
+  stringToJSON,
+  InvalidConfiguration,
+  satisfies,
+  structuredClone,
+  isNode,
+  isWeb,
+  isOfflineMode,
+  prepMobileRows,
+  hashString,
+  cloneName,
+} from "../utils.js";
+
+import tags from "@saltcorn/markup/tags";
+const { div } = tags;
+import markup from "@saltcorn/markup/index";
+const { renderForm } = markup;
+
+import type {
+  ViewTemplate,
+  FieldLike,
+  Tablely,
+  RunExtra,
+  ConnectedObjects,
+  Res,
+  Req,
+  AuthorizeAccessResult,
+} from "@saltcorn/types/base_types";
+import type Table from "./table.js";
+import type { Where, SelectOptions } from "@saltcorn/db-common/internal";
+import { GenObj } from "@saltcorn/types/common_types";
+import type {
+  ViewCfg,
+  AbstractView,
+} from "@saltcorn/types/model-abstracts/abstract_view";
+import type { AbstractTable } from "@saltcorn/types/model-abstracts/abstract_table";
+import { AbstractTag } from "@saltcorn/types/model-abstracts/abstract_tag";
+import bcryptjs from "bcryptjs";
+const { hash } = bcryptjs;
+
+import { remove_from_menu } from "./config.js";
+
+declare const saltcorn: any;
+
+/**
+ * View Class
+ * @category saltcorn-data
+ */
+class View implements AbstractView {
+  name: string;
+  id?: number;
+  table_id?: number;
+  viewtemplate: string;
+  min_role: number;
+  viewtemplateObj?: ViewTemplate;
+  default_render_page?: string;
+  exttable_name?: string;
+  description?: string;
+  table_name?: string;
+  configuration?: any;
+  attributes?: any;
+  table?: AbstractTable;
+  singleton?: boolean;
+  slug?: any;
+  updated_at?: Date;
+
+  /**
+   * View constructor
+   * @param {object} o
+   */
+  constructor(o: ViewCfg | View) {
+    this.name = o.name;
+    this.id = o.id;
+    this.viewtemplate = o.viewtemplate;
+    this.exttable_name = o.exttable_name;
+    this.description = o.description;
+    if (o.table_id) this.table_id = o.table_id;
+    if (o.table && !o.table_id) {
+      this.table_id = o.table.id;
+    }
+    if (o.table_name) this.table_name = o.table_name;
+    this.configuration = stringToJSON(o.configuration);
+    if (!o.min_role && !(o as any).is_public) {
+      throw new InvalidConfiguration(
+        `Unable to build view ${this.name}, neither 'min_role' or 'is_public' is given.`
+      );
+    }
+    this.min_role =
+      !o.min_role && typeWithDefinedMember<ViewCfg>(o, "is_public")
+        ? o.is_public
+          ? 100
+          : 80
+        : +o.min_role!;
+    this.viewtemplateObj = getState()!.viewtemplates[this.viewtemplate];
+    this.singleton = this.viewtemplateObj?.singleton;
+    this.default_render_page = o.default_render_page;
+    this.table = o.table;
+    this.slug = stringToJSON(o.slug);
+    this.attributes = stringToJSON(o.attributes);
+    this.updated_at = ["string", "number"].includes(typeof o.updated_at)
+      ? new Date(o.updated_at as any)
+      : o.updated_at;
+  }
+
+  /**
+   * @param {object} where
+   * @returns {View}
+   */
+  static findOne(where: Where): View | undefined {
+    const v = getState()!.views.find(
+      where.id
+        ? (v: View) => v.id === +where.id
+        : where.name
+          ? (v: View) => v.name === where.name
+          : satisfies(where)
+    );
+    return v
+      ? new View({ ...v, configuration: structuredClone(v.configuration) })
+      : v;
+  }
+
+  /**
+   * @param where
+   * @param selectopts
+   * @returns {Promise<View[]>}
+   */
+  static async find(
+    where?: Where,
+    selectopts: SelectOptions = { orderBy: "name", nocase: true }
+  ): Promise<Array<View>> {
+    if (selectopts.cached) {
+      return getState()!
+        .views.map((t: View) => new View(t))
+        .filter(satisfies(where || {}));
+    }
+    const views_db = await db.select("_sc_views", where, selectopts);
+    const views: View[] = views_db.map((v: View) => new View(v));
+    const viewtemplates: ViewTemplate[] = Object.values(
+      getState()!.viewtemplates
+    );
+    viewtemplates.forEach((vt) => {
+      if (vt.singleton && satisfies(where || {})(vt)) {
+        views.push(
+          new View({
+            name: vt.name,
+            viewtemplate: vt.name,
+            viewtemplateObj: vt,
+            min_role: 1,
+            configuration: {},
+            singleton: true,
+          })
+        );
+      }
+    });
+    const orderBy = (selectopts?.orderBy as string) || "name";
+
+    views.sort((a: any, b: any) =>
+      (a?.[orderBy]?.toLowerCase?.() || a?.[orderBy]) >
+      (b?.[orderBy]?.toLowerCase?.() || b?.[orderBy])
+        ? 1
+        : -1
+    );
+    return views;
+  }
+
+  /**
+   * @returns {Promise<object[]>}
+   */
+  async get_state_fields(): Promise<Array<FieldLike>> {
+    if (
+      this.viewtemplateObj &&
+      this.viewtemplateObj.get_state_fields &&
+      (this.exttable_name || this.table_id)
+    ) {
+      return await this.viewtemplateObj.get_state_fields(
+        // @ts-ignore
+        this.exttable_name || this.table_id,
+        this.name,
+        this.configuration
+      );
+    } else return [];
+  }
+
+  static async state_refresh() {
+    await nsState.getState()!.refresh_views();
+  }
+
+  /**
+   * Get menu label
+   * @type {string|undefined}
+   */
+  get menu_label(): string | undefined {
+    const menu_items = getState()!.getConfig("menu_items", []);
+    const item = menu_items.find((mi: any) => mi.viewname === this.name);
+    return item ? item.label : undefined;
+  }
+
+  /**
+   * @param table
+   * @param pred
+   * @returns {Promise<object[]>}
+   */
+  static async find_table_views_where(
+    table: number | Tablely | string,
+    pred: FindViewsPred
+  ): Promise<Array<View>> {
+    let link_view_opts = [];
+    const link_views = await View.find(
+      typeWithDefinedMember<Table>(table, "id")
+        ? {
+            table_id: table.id,
+          }
+        : typeWithDefinedMember<Table>(table, "name")
+          ? { exttable_name: table.name }
+          : typeof table === "string"
+            ? { exttable_name: table }
+            : { table_id: table },
+      { orderBy: "name", nocase: true, cached: true }
+    );
+
+    for (const viewrow of link_views) {
+      // may fail if incomplete view
+      const sfs = await viewrow.get_state_fields();
+      if (
+        viewrow.viewtemplateObj &&
+        pred({
+          viewrow,
+          viewtemplate: viewrow.viewtemplateObj,
+          state_fields: sfs,
+        })
+      )
+        link_view_opts.push(viewrow);
+    }
+    return link_view_opts;
+  }
+
+  /**
+   * @type {object}
+   */
+  get select_option(): any {
+    return {
+      name: this.name,
+      label: `${this.name} [${this.viewtemplate}${
+        this.table
+          ? ` on ${this.table.name}`
+          : this.table_name
+            ? ` on ${this.table_name}`
+            : this.exttable_name
+              ? ` on ${this.exttable_name}`
+              : ""
+      }]`,
+    };
+  }
+
+  /**
+   * @param {function} pred
+   * @returns {Promise<object>}
+   */
+  static async find_all_views_where(pred: FindViewsPred): Promise<Array<View>> {
+    let link_view_opts = [];
+    const link_views = await View.find({}, { orderBy: "name", nocase: true });
+
+    for (const viewrow of link_views) {
+      // may fail if incomplete view
+      const sfs = await viewrow.get_state_fields();
+      if (
+        viewrow.viewtemplateObj &&
+        pred({
+          viewrow,
+          viewtemplate: viewrow.viewtemplateObj,
+          state_fields: sfs,
+        })
+      )
+        link_view_opts.push(viewrow);
+    }
+    return link_view_opts;
+  }
+
+  /**
+   * @param {Table|object} table
+   * @returns {Promise<View[]>}
+   */
+  static async find_possible_links_to_table(
+    table: number | Tablely | string
+  ): Promise<Array<View>> {
+    return await View.find_table_views_where(
+      table,
+      ({ state_fields }: { state_fields: Array<FieldLike> }) =>
+        state_fields.some((sf: FieldLike) => sf.name === "id" || sf.primary_key)
+    );
+  }
+
+  /**
+   * Create view in database
+   * @param v
+   * @returns {Promise<View>}
+   */
+  // todo there hard code about roles and flag is_public
+  static async create(v: ViewCfg): Promise<View> {
+    // is_public flag processing
+    if (!v.min_role && typeof v.is_public !== "undefined") {
+      v.min_role = v.is_public ? 100 : 80;
+      delete v.is_public;
+    }
+    const { table, ...row } = v;
+    // insert view definition into _sc_views
+    row.updated_at = new Date();
+    const id = await db.insert("_sc_views", row);
+    // refresh views list cache
+    if (!db.getRequestContext()?.client)
+      await nsState.getState()!.refresh_views(true);
+    return new View({ id, ...v, updated_at: row.updated_at });
+  }
+
+  /**
+   * Clone View
+   * @returns {Promise<View>}
+   */
+  async clone(): Promise<View> {
+    const existingNames = await View.find({ name: { ilike: this.name } });
+    const newname = cloneName(
+      this.name,
+      existingNames.map((v) => v.name)
+    );
+
+    const createObj: View = {
+      ...this,
+      name: newname,
+    };
+    delete createObj.viewtemplateObj;
+    delete createObj.id;
+    delete createObj.singleton;
+    // very confusing for user if a view with default_render_page is copied
+    delete createObj.default_render_page;
+    return await View.create(createObj);
+  }
+
+  /**
+   * Delete current view from db
+   * @returns {Promise<void>}
+   */
+  async delete(): Promise<void> {
+    if (
+      this.viewtemplateObj &&
+      this.viewtemplateObj.on_delete &&
+      this.table_id &&
+      this.configuration
+    )
+      await this.viewtemplateObj.on_delete(
+        this.table_id,
+        this.name,
+        this.configuration
+      );
+    // delete tag entries from _sc_tag_entries
+    await db.deleteWhere("_sc_tag_entries", { view_id: this.id });
+    // delete view from _sc_view
+    await db.deleteWhere("_sc_views", { id: this.id });
+    // remove view from menu
+    await remove_from_menu({ name: this.name, type: "View" });
+    // fresh view list cache
+    if (!db.getRequestContext()?.client)
+      await nsState.getState()!.refresh_views(true);
+  }
+
+  /**
+   * Delete list of views
+   * @param where - condition
+   * @returns {Promise<void>}
+   */
+  static async delete(where: Where): Promise<void> {
+    const vs = await View.find(where);
+    for (const v of vs) await v.delete();
+  }
+
+  /**
+   * Update View description
+   * @param v - view name
+   * @param id - id
+   * @returns {Promise<void>}
+   */
+  static async update(v: any, id: number): Promise<void> {
+    // update view description
+    await db.update("_sc_views", { ...v, updated_at: new Date() }, id);
+    // fresh view list cache
+    if (!db.getRequestContext()?.client)
+      await nsState.getState()!.refresh_views(true);
+  }
+
+  /**
+   * @param {*} arg
+   * @param {boolean} remote
+   * @returns {Promise<object>}
+   */
+  async interpolate_title_string(title: string, query: any): Promise<string> {
+    if (!this.viewtemplateObj?.interpolate_title_string) return title;
+    return await this.viewtemplateObj.interpolate_title_string(
+      this.table_id || this.exttable_name,
+      title,
+      query
+    );
+  }
+
+  /**
+   * Full access decision: checks plugin `authorize_view` hooks and combines
+   * with min_role. A hook's explicit allow/deny always wins; only when
+   * every hook abstains does min_role decide. Proxied to the server on
+   * mobile for remote tables, so hooks never need to handle remote/local.
+   * @param user - the acting user (or undefined/public)
+   * @param opts.action - "get" or "post"
+   * @param opts.req - the request object, forwarded to hooks
+   * @param opts.state - query/state, for action "get"
+   * @param opts.body - POST body, for action "post"
+   * @param opts.route - name of a specific viewtemplate custom route being
+   *   invoked (ViewTemplate.routes key), if any
+   * @param opts.remote - defaults to `this.isRemoteTable()`
+   * @returns {Promise<boolean>}
+   */
+  async authorize(
+    user: any,
+    opts: {
+      action: "get" | "post";
+      req: any;
+      state?: GenObj;
+      body?: GenObj;
+      route?: string;
+      remote?: boolean;
+    }
+  ): Promise<boolean> {
+    let remote = opts.remote;
+    if (remote === undefined) remote = this.isRemoteTable();
+    const role = user?.role_id ?? 100;
+    // local-only fast path - a remote table's hooks live on the server, not here
+    if (!remote && !getState()!.hasAuthorizeHooks("view"))
+      return role <= this.min_role;
+    const hookResult: AuthorizeAccessResult | null = remote
+      ? await this.remoteAuthorize(
+          opts.action,
+          opts.route,
+          opts.state,
+          opts.body,
+          opts.req
+        )
+      : await getState()!.authorizeView(
+          {
+            action: opts.action,
+            view: this,
+            route: opts.route,
+            state: opts.state,
+            body: opts.body,
+            req: opts.req,
+          },
+          user
+        );
+    if (hookResult?.decision === "deny") return false;
+    if (hookResult?.decision === "allow") return true;
+    return role <= this.min_role;
+  }
+
+  /**
+   * @deprecated use `authorize(user, { action: "post", ... })` instead.
+   * `remote` defaults to `false` here, not `isRemoteTable()`.
+   * @param arg
+   * @param remote
+   * @returns {Promise<boolean>}
+   */
+  async authorise_post(
+    arg: {
+      body: any;
+      table_id: number;
+      req: NonNullable<any>;
+    },
+    remote: boolean = false
+  ): Promise<boolean> {
+    return await this.authorize(arg.req?.user, {
+      action: "post",
+      req: arg.req,
+      body: arg.body,
+      remote,
+    });
+  }
+
+  /**
+   * @deprecated use `authorize(user, { action: "get", ... })` instead.
+   * `remote` defaults to `false` here, not `isRemoteTable()`.
+   * @param arg
+   * @param remote
+   * @returns {Promise<boolean>}
+   */
+  async authorise_get(
+    arg: {
+      query: any;
+      table_id: number;
+      req: NonNullable<any>;
+    },
+    remote: boolean = false
+  ): Promise<boolean> {
+    return await this.authorize(arg.req?.user, {
+      action: "get",
+      req: arg.req,
+      state: arg.query,
+      remote,
+    });
+  }
+
+  /**
+   * @returns {string}
+   */
+  getStringsForI18n(): string[] {
+    if (!this.viewtemplateObj || !this.viewtemplateObj.getStringsForI18n)
+      return [];
+    const inView = this.viewtemplateObj.getStringsForI18n(this.configuration);
+    return [
+      ...inView,
+      this.attributes?.page_title,
+      this.attributes?.popup_title,
+    ];
+  }
+
+  /**
+   * @returns {string}
+   */
+  async runServerSide(query: any): Promise<string> {
+    const response = await saltcorn.mobileApp.api.apiCall({
+      method: "GET",
+      path: `/view/${this.name}/run`,
+    });
+    return response.data;
+  }
+
+  /**
+   * Run (Execute) View
+   * @param {any} query
+   * @param  {RunExtra} extraArgs
+   * @param {boolean}  remote
+   * @returns {Promise<*>}
+   */
+  async run(
+    query: any,
+    extraArgs: RunExtra,
+    remote: boolean = !isNode() && !isOfflineMode()
+  ): Promise<any> {
+    if (isWeb(extraArgs.req)) this.check_viewtemplate();
+    else if (!this.viewtemplateObj) return "";
+    const table_id = this.exttable_name || this.table_id;
+    const state = nsState.getState()!;
+    if (
+      extraArgs.alreadyAuthorizedFor !== this &&
+      !(await this.authorize(extraArgs.req?.user, {
+        action: "get",
+        req: extraArgs.req,
+        state: query,
+        remote,
+      }))
+    )
+      return "";
+    try {
+      const viewState = removeEmptyStringsKeepNull(query);
+      state.log(
+        5,
+        `Running view ${this.name} with state ${JSON.stringify(viewState)}`
+      );
+      return await this.viewtemplateObj!.run(
+        table_id,
+        this.name,
+        this.configuration,
+        viewState,
+        extraArgs,
+        this.queries(remote, extraArgs.req, extraArgs.res)
+      );
+    } catch (error: any) {
+      state.log(2, error.stack);
+      error.message = `In ${this.name} view (${this.viewtemplate} viewtemplate):\n${error.message}`;
+      throw error;
+    }
+  }
+
+  /**
+   * POSTs to this view's remote server.
+   * @returns the parsed response body
+   */
+  private async remotePost(path: string, body: any, req?: Req): Promise<any> {
+    const state = getState()!;
+    const url = `${state.getConfig("base_url")}${path}`;
+    const headers: any = {
+      "X-Requested-With": "XMLHttpRequest",
+      "X-Saltcorn-Client": "mobile-app",
+      "Content-Type": "application/json",
+    };
+    if (state.mobileConfig?.csrfToken)
+      headers["CSRF-Token"] = state.mobileConfig.csrfToken;
+    // set only in Node test runs - Node's fetch has no cookie jar
+    if (state.mobileConfig?.cookie) headers["Cookie"] = state.mobileConfig.cookie;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        credentials: "include",
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const error: any = new Error(
+          `Request failed with status code ${res.status}`
+        );
+        error.response = { status: res.status };
+        throw error;
+      }
+      const data = await res.json();
+      for (const { type, msg } of data.alerts) req?.flash(type, msg);
+      return data;
+    } catch (error: any) {
+      state.log(1, `Remote call error for view ${this.name} (${path}): ${error.message}`);
+      if (error.response?.status === 401) error.message = req?.__("Not authorized");
+      else error.message = `Unable to call POST ${url}:\n${error.message}`;
+      throw error;
+    }
+  }
+
+  /**
+   * Proxies an authorize_view hook check to this view's remote server.
+   * An access decision, not a viewtemplate query - kept out of queries() below.
+   * The server decides against its own session user, not a value we'd send here.
+   */
+  private async remoteAuthorize(
+    action: "get" | "post",
+    route: string | undefined,
+    qstate: GenObj | undefined,
+    qbody: GenObj | undefined,
+    req?: Req
+  ): Promise<AuthorizeAccessResult | null> {
+    const data = await this.remotePost(
+      `/api/viewAuthorize/${this.name}`,
+      { action, route, state: qstate, body: qbody },
+      req
+    );
+    return data.success;
+  }
+
+  queries(remote?: boolean, req?: Req, res?: any) {
+    const queryObj: GenObj = this?.viewtemplateObj?.queries
+      ? this.viewtemplateObj!.queries({ ...this, req, res })
+      : {};
+    if (remote) {
+      const state = getState()!;
+      const queries: any = {};
+      const table = tableMod.findOne({ id: this.table_id });
+      const fields = table?.getFields() || [];
+      Object.entries(queryObj).forEach(([k, v]) => {
+        queries[k] = async (...args: any[]) => {
+          const argsStr = `${JSON.stringify(args)}${this.name}`;
+          const hashedArgs = hashString(argsStr);
+          if (state.queriesCache && state.queriesCache[hashedArgs])
+            return state.queriesCache[hashedArgs];
+          const data = await this.remotePost(
+            `/api/viewQuery/${this.name}/${k}`,
+            { args },
+            req
+          );
+          const result = Array.isArray(data.success)
+            ? prepMobileRows(data.success, fields)
+            : data.success;
+          if (state.queriesCache) state.queriesCache[hashedArgs] = result;
+          return result;
+        };
+      });
+
+      return queries;
+    } else {
+      return queryObj;
+    }
+  }
+
+  /**
+   * @throws {InvalidConfiguration}
+   */
+  check_viewtemplate(): void {
+    if (!this.viewtemplateObj)
+      throw new InvalidConfiguration(
+        `Cannot find viewtemplate ${this.viewtemplate} in view ${this.name}`
+      );
+  }
+
+  /**
+   * @param {*} query
+   * @param {*} req
+   * @param {*} res
+   * @param {boolean} remote
+   * @returns {Promise<object>}
+   */
+  async run_possibly_on_page(
+    query: any,
+    req: Req,
+    res: Res,
+    remote: boolean = false,
+    extra: any = {}
+  ): Promise<string | { goto?: string }> {
+    const view = this;
+    if (isWeb(req)) this.check_viewtemplate();
+    else if (!this.viewtemplateObj) return "";
+    if (!isNode() && this.viewtemplateObj?.name === "WorkflowRoom") {
+      const { isOfflineMode } = (nsState.getState()!.mobileConfig as any) || {};
+      if (!isOfflineMode) return await this.runServerSide(query);
+    }
+    if (view.default_render_page && (!req.xhr || req.headers.pjaxpageload)) {
+      const db_page = await Page.findOne({ name: view.default_render_page });
+      if (db_page) {
+        // db_page's own access was never checked by the view-level check above
+        if (
+          !(await db_page.authorize(req.user, {
+            action: "get",
+            req,
+            state: query,
+          }))
+        ) {
+          if (!req.user)
+            return {
+              goto: `/auth/login?dest=${encodeURIComponent(req.originalUrl)}`,
+            };
+          req.flash("danger", req.__("Not authorized"));
+          return { goto: "/" };
+        }
+        const pageResult = await db_page.run(query, { res, req, ...extra });
+        if (pageResult === null) return ""; // res already redirected by an on_page_load action
+        return pageResult as any;
+      }
+    }
+    const state = view.combine_state_and_default_state(query);
+    const resp = await view.run(
+      state,
+      { res, req, ...extra },
+      remote
+    );
+    //console.log(req.headers);
+
+    const isModal = req.headers?.saltcornmodalrequest;
+    if (isModal) {
+    }
+
+    // return contents
+    return resp; // typeof resp === "string" ? resp) : resp;
+  }
+
+  /**
+   * Run many views with content filtered by query.
+   * Used in Search for example
+   * @param query this is query string
+   * @param extraArgs
+   * @param remote
+   * @throws
+   * @returns
+   */
+  async runMany(
+    query: GenObj,
+    extraArgs: RunExtra,
+    remote?: boolean
+  ): Promise<string[] | Array<{ html: string; row: any }>> {
+    if (isWeb(extraArgs.req)) this.check_viewtemplate();
+    else if (!this.viewtemplateObj) return [];
+    const state = nsState.getState()!;
+    if (
+      extraArgs.alreadyAuthorizedFor !== this &&
+      !(await this.authorize(extraArgs.req?.user, {
+        action: "get",
+        req: extraArgs.req,
+        state: query,
+        remote,
+      }))
+    )
+      return [];
+    state.log(
+      5,
+      `runMany view ${this.name} with state ${JSON.stringify(query)}`
+    );
+    try {
+      if (this.viewtemplateObj?.runMany) {
+        if (!this.table_id) {
+          throw new InvalidConfiguration(
+            `Unable to call runMany, ${this.viewtemplate} is missing 'table_id'.`
+          );
+        }
+        if (remote === undefined) remote = this.isRemoteTable();
+        return await this.viewtemplateObj!.runMany(
+          this.table_id,
+          this.name,
+          this.configuration,
+          query,
+          extraArgs,
+          this.queries(remote, extraArgs.req, extraArgs.res)
+        );
+      }
+      if (this.viewtemplateObj?.renderRows) {
+        const Table = (await import("./table.js")).default;
+        const { stateFieldsToWhere } = await import("../plugin-helper.js");
+        const tbl = Table.findOne({ id: this.table_id });
+        if (!tbl)
+          throw new Error(`Unable to find table with id ${this.table_id}`);
+        const fields = tbl.getFields();
+        const qstate = stateFieldsToWhere({
+          fields,
+          state: query,
+          table: tbl,
+        });
+        const rows = await tbl.getRows(qstate);
+        const rendered = await this.viewtemplateObj!.renderRows(
+          tbl,
+          this.name,
+          this.configuration,
+          extraArgs,
+          rows,
+          query
+        );
+
+        return rendered.map((html: string, ix: number) => ({
+          html,
+          row: rows[ix],
+        }));
+      }
+    } catch (error: any) {
+      error.message = `In ${this.name} view (${this.viewtemplate} viewtemplate):\n${error.message}`;
+      throw error;
+    }
+    throw new InvalidConfiguration(
+      `runMany on view ${this.name}: viewtemplate ${this.viewtemplate} does not have renderRows or runMany methods`
+    );
+  }
+
+  /**
+   * @param {*} query
+   * @param {*} body
+   * @param {*} extraArgs
+   * @param {boolean} remote
+   * @returns {Promise<object>}
+   */
+  async runPost(
+    query: GenObj,
+    body: GenObj,
+    extraArgs: RunExtra,
+    remote: boolean = !isNode()
+  ): Promise<any> {
+    const state = getState()!;
+    if (!state.mobileConfig) {
+      remote = false;
+    }
+    if (
+      extraArgs.alreadyAuthorizedFor !== this &&
+      !(await this.authorize(extraArgs.req?.user, {
+        action: "post",
+        req: extraArgs.req,
+        body,
+        remote,
+      }))
+    )
+      return "";
+    try {
+      if (isWeb(extraArgs.req)) this.check_viewtemplate();
+      else if (!this.viewtemplateObj) return;
+      state.log(
+        5,
+        `runPost view ${this.name} with state ${JSON.stringify(query)}`
+      );
+      if (!this.viewtemplateObj!.runPost)
+        throw new InvalidConfiguration(
+          `Unable to call runPost, ${this.viewtemplate} is missing 'runPost'.`
+        );
+      return await this.viewtemplateObj!.runPost(
+        this.table_id,
+        this.name,
+        this.configuration,
+        removeEmptyStrings(query),
+        removeEmptyStrings(body),
+        extraArgs,
+        this.queries(remote, extraArgs.req, extraArgs.res),
+        remote
+      );
+    } catch (error: any) {
+      state.log(1, error);
+      error.message = `In POST ${this.name} view (${this.viewtemplate} viewtemplate):\n${error.message}`;
+      throw error;
+    }
+  }
+
+  /**
+   * @param {*} route
+   * @param {*} body
+   * @param {*} res
+   * @param {*} extraArgs
+   * @param {boolean} remote
+   * @returns {Promise<void>}
+   */
+  async runRoute(
+    route: string,
+    body: any,
+    res: Res,
+    extraArgs: RunExtra,
+    remote: boolean = false
+  ): Promise<any> {
+    if (isWeb(extraArgs.req)) this.check_viewtemplate();
+    else if (!this.viewtemplateObj) return res.json({ excluded: true });
+    if (!this.viewtemplateObj!.routes)
+      throw new InvalidConfiguration(
+        `Unable to call runRoute of view '${this.name}', ${this.viewtemplate} is missing 'routes'.`
+      );
+    nsState
+      .getState()!
+      .log(
+        5,
+        `Run route ${route} view ${this.name} with body ${JSON.stringify(body)}`
+      );
+    const result = await this.viewtemplateObj!.routes[route](
+      this.table_id,
+      this.name,
+      this.configuration,
+      body,
+      extraArgs,
+      this.queries(remote, extraArgs.req, extraArgs.res)
+    );
+    if (result?.status && typeof result.stack === "number")
+      res.status(result.status);
+
+    if (result && result.json) res.json(result.json);
+    else if (result && result.html) {
+      if (result?.title)
+        res.set("Page-Title", encodeURIComponent(result.title));
+      res.send(result.html);
+    } else if (!res.headersSent && (isNode() || (!isNode() && !res.getJson())))
+      res.json({ success: "ok" });
+  }
+
+  async openDataStream(
+    id: number | undefined,
+    fieldName: string,
+    fieldView: string,
+    user: any,
+    targetOpts: any
+  ) {
+    if (!this.viewtemplateObj?.openDataStream)
+      throw new InvalidConfiguration(
+        `Unable to call openDataStream, ${this.viewtemplate} is missing 'openDataStream'.`
+      );
+    return await this.viewtemplateObj.openDataStream(
+      this.table_id,
+      this.name,
+      id,
+      fieldName,
+      fieldView,
+      user,
+      this.configuration,
+      targetOpts
+    );
+  }
+
+  /**
+   * @param {object} req_query
+   * @returns {object}
+   */
+  combine_state_and_default_state(req_query: any): any {
+    var state = { ...req_query };
+    if (isNode()) this.check_viewtemplate();
+    else if (!this.viewtemplateObj) return state;
+    const defstate = this.viewtemplateObj!.default_state_form
+      ? this.viewtemplateObj!.default_state_form(this.configuration)
+      : {};
+
+    Object.entries(defstate || {}).forEach(([k, v]) => {
+      if (
+        typeof state[k] === "undefined" &&
+        v !== "" &&
+        !(typeof v === "object" && v && !Object.keys(v).length)
+      ) {
+        state[k] = v;
+      }
+    });
+    return state;
+  }
+
+  /**
+   * @param {object} req
+   * @returns {Promise<object>}
+   */
+  async get_config_flow(req: Req): Promise<Workflow> {
+    this.check_viewtemplate();
+    if (!this.id)
+      throw new InvalidConfiguration(
+        `Unable to execute 'get_config_flow' of view '${this.name}', 'this.name' must be set.`
+      );
+    const onDoneRedirect = req.query?.on_done_redirect;
+    let action = `/viewedit/config/${encodeURIComponent(this.name)}`;
+    if (onDoneRedirect) {
+      action = `${action}?on_done_redirect=${encodeURIComponent(onDoneRedirect)}`;
+    }
+    if (!this.viewtemplateObj!.configuration_workflow) {
+      return new Workflow({ steps: [] });
+    }
+    const configFlow = this.viewtemplateObj!.configuration_workflow(req);
+    configFlow.action = action;
+    const oldOnDone = configFlow.onDone || ((c: any) => c);
+    configFlow.onDone = async (ctx: any) => {
+      const { table_id, ...configuration } = await oldOnDone(ctx);
+
+      await View.update({ configuration }, this.id!);
+      return {
+        redirect: onDoneRedirect ? `/${onDoneRedirect}` : `/viewedit`,
+        flash: [
+          "success",
+          `View <a href="/view/${this.name || ""}">${
+            this.name || ""
+          }</a> saved`,
+        ],
+      };
+    };
+    configFlow.saveURL = `/viewedit/saveconfig/${this.name}`;
+    configFlow.autoSave = true;
+    configFlow.startAtStepURL = (stepNm) =>
+      `/viewedit/config/${this.name}?step=${stepNm}${
+        onDoneRedirect
+          ? `&on_done_redirect=${encodeURIComponent(onDoneRedirect)}`
+          : ""
+      }`;
+    configFlow.previewURL = `/view/${this.name}/preview`;
+    return configFlow;
+  }
+
+  rewrite_query_from_slug(query: any, params: any): void {
+    let pix = 0;
+    if (!params) return;
+    if (this.slug && this.slug.steps && this.slug.steps.length > 0) {
+      for (const step of this.slug.steps) {
+        if (step.unique && params[pix]) {
+          query[step.field] = step.transform
+            ? { [step.transform]: params[pix] }
+            : params[pix];
+          return;
+        }
+        pix += 1;
+      }
+    }
+  }
+
+  //get entities using/linking to this
+  async inbound_connected_objects(): Promise<ConnectedObjects> {
+    const embeddedViews: Array<AbstractView> = [];
+    const linkedViews: Array<AbstractView> = [];
+    const allViews = await View.find({}, { cached: true });
+    for (const view of allViews) {
+      if (!view?.viewtemplateObj?.connectedObjects) continue;
+      const result = await view.viewtemplateObj.connectedObjects(
+        view.configuration
+      );
+      for (const eview of result.embeddedViews || []) {
+        if (eview.name === this.name) embeddedViews.push(view);
+      }
+      for (const eview of result.linkedViews || []) {
+        if (eview.name === this.name) linkedViews.push(view);
+      }
+    }
+    return { embeddedViews, linkedViews };
+  }
+
+  async connected_objects(): Promise<ConnectedObjects> {
+    const Table = (await import("./table.js")).default;
+    const viewTbl = this.table_id
+      ? Table.findOne({ id: this.table_id })
+      : undefined;
+    if (!this.viewtemplateObj?.connectedObjects)
+      return viewTbl ? { tables: [viewTbl] } : {};
+    else {
+      const result = await this.viewtemplateObj.connectedObjects(
+        this.configuration
+      );
+      if (viewTbl) {
+        if (!result) return { tables: [viewTbl] };
+        else if (result.tables) result.tables.push(viewTbl);
+        else result.tables = [viewTbl];
+      }
+      return result;
+    }
+  }
+
+  /**
+   * saltcorn-mobile-app helper.
+   * True when this process has no local data access and must proxy
+   * queries to the server (mobile, online). False on the server, and
+   * false on mobile when offline. Not a per-table check despite the name.
+   * @returns whether this view's queries must go over the network
+   */
+  isRemoteTable(): boolean {
+    if (isNode()) return false;
+    const mobileConfig = getState()!.mobileConfig;
+    if (mobileConfig?.isOfflineMode) return false;
+    return true;
+  }
+
+  /**
+   * get all tags associated with this view
+   * @returns a promise with the tags
+   */
+  async getTags(): Promise<Array<AbstractTag>> {
+    const Tag = (await import("./tag.js")).default;
+    return await Tag.findWithEntries({ view_id: this.id });
+  }
+
+  /**
+   * emit a Real-time collaboration event for this view.
+   * @param eventType event without view name (e.g. "DROP_EVENT")
+   * @param data object you want to get in the event handler
+   */
+  emitRealTimeEvent(eventType: string, data: any): void {
+    const state = getState()!;
+    const withViewName = this.getRealTimeEventName(eventType);
+    state.emitCollabMessage(
+      db.getTenantSchema(),
+      withViewName,
+      data,
+      this.name
+    );
+  }
+
+  /**
+   * get event name with view name in it (e.g. DROP_EVENT_my_kanban_view).
+   * @param eventType event without view name (e.g. "DROP_EVENT")
+   * @returns the full event name
+   */
+  getRealTimeEventName(eventType: string): string {
+    return `${this.name}_${eventType}`;
+  }
+
+  /**
+   * Should we render on the local machine or get it from a server?
+   * In the normal web mode it's always the server but on mobile, we can render on the device as well
+   */
+  renderLocally() {
+    return (
+      isNode() ||
+      isOfflineMode() ||
+      !this.viewtemplateObj?.mobile_render_server_side
+    );
+  }
+}
+
+function typeWithDefinedMember<T>(object: any, member: string): object is T {
+  return (
+    typeof object === "object" &&
+    object &&
+    member in object &&
+    object[member] !== undefined &&
+    object[member] !== null
+  );
+}
+
+namespace View {
+  export type FindViewsPred = (arg0: {
+    viewrow: View;
+    viewtemplate?: ViewTemplate;
+    state_fields: Array<FieldLike>;
+  }) => boolean;
+}
+
+type FindViewsPred = View.FindViewsPred;
+
+export default View;

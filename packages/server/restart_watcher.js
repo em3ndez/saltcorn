@@ -1,0 +1,203 @@
+/**
+ * @category server
+ * @module restart_watcher
+ */
+
+import { fileURLToPath as __fileURLToPath } from "url";
+import { dirname as __pathDirname } from "path";
+const __filename = __fileURLToPath(import.meta.url);
+const __dirname = __pathDirname(__filename);
+import path from "path";
+import { spawnSync } from "child_process";
+import watch from "node-watch";
+import Plugin from "@saltcorn/data/models/plugin";
+import db from "@saltcorn/data/db";
+import _am_tenant from "@saltcorn/admin-models/models/tenant";
+const { eachTenant } = _am_tenant;
+/**
+ * packages that should trigger a server re-start
+ */
+const relevantPackages = [
+  "db-common",
+  "common-code",
+  "plugins-loader",
+  "postgres",
+  "saltcorn-data",
+  "saltcorn-builder",
+  "saltcorn-admin-models",
+  "saltcorn-markup",
+  "saltcorn-sbadmin2",
+  "saltcorn-types",
+  "server",
+  "sqlite",
+  "filemanager",
+  "workflow-editor",
+];
+
+/**
+ * excluded directories or file name patterns
+ */
+const excludePatterns = [
+  /\/node_modules/,
+  /\.git/,
+  /\.docs/,
+  /\.docs/,
+  /migrations/,
+  /.*test.js/,
+  /.*test.ts/,
+];
+
+/**
+ * get the root directory of the saltcorn project
+ * @returns {string} project root path
+ */
+const getProjectRoot = () => {
+  return path.normalize(`${__dirname}/../../../`);
+};
+
+/**
+ * get the packages directory of the saltcorn project
+ * @returns {string} packages path
+ */
+const getPackagesDirectory = () => {
+  return `${getProjectRoot()}/packages`;
+};
+
+/**
+ * get all package directories that should trigger a server re-start
+ * @returns {string[]} list of paths to relevant directories
+ */
+const getRelevantPackages = () => {
+  const packagesDir = getPackagesDirectory();
+  return relevantPackages.map((packageName) => `${packagesDir}/${packageName}`);
+};
+
+/**
+ * get all plugin directories that should trigger a server re-start
+ * @returns {string[]} list of paths to relevant directories
+ */
+const getPluginDirectories = async () => {
+  const getDirs = async () => {
+    const local_plugins = await Plugin.find({ source: "local" });
+    return local_plugins.map((p) => p.location);
+  };
+  const listOfDirs = [];
+  await eachTenant(async () => {
+    listOfDirs.push(await getDirs());
+  });
+  return [...new Set(listOfDirs.flat(1))];
+};
+
+const projectRoot = getProjectRoot();
+
+const watchCfg = {
+  recursive: true,
+  filter(file, skip) {
+    for (const excludePattern of excludePatterns) {
+      if (excludePattern.test(file)) return skip;
+    }
+    return /(\.js|\.jsx|\.ts|\.svelte)$/.test(file);
+  },
+};
+
+const reactPackages = [
+  {
+    watchDir: "packages/saltcorn-builder/src",
+    buildDir: "packages/saltcorn-builder/",
+  },
+  {
+    watchDir: "packages/filemanager/src",
+    buildDir: "packages/filemanager",
+  },
+  {
+    watchDir: "packages/workflow-editor/src",
+    buildDir: "packages/workflow-editor",
+  },
+];
+
+let activeWatchers = [];
+
+/**
+ * close all open file watchers
+ */
+const closeWatchers = () => {
+  for (const activeWatcher of activeWatchers) {
+    if (!activeWatcher.isClosed()) {
+      activeWatcher.close();
+    }
+  }
+};
+
+/**
+ * register many file change listener and do re-starts on changes
+ * The listener calls process.exit() and assumes
+ * that pm2 does the actual re-start.
+ * @param {string[]} projectDirs package paths that should trigger re-starts.
+ * @param {string[]} pluginDirs plugin paths that should trigger re-starts.
+ */
+const listenForChanges = (projectDirs, pluginDirs) => {
+  // watch react packages
+
+  for (const { watchDir, buildDir } of reactPackages) {
+    activeWatchers.push(
+      watch(
+        watchDir,
+        watchCfg,
+        // event is either 'update' or 'remove'
+        (event, file) => {
+          console.log("'%s' changed \n re-starting now", file);
+          closeWatchers();
+          const { status } = spawnSync("npm", ["run", "builddev"], {
+            stdio: "inherit",
+            cwd: buildDir,
+          });
+          process.exit(status ? 2 : 0);
+        }
+      )
+    );
+  }
+
+  // watch project dirs
+  for (const projectDir of projectDirs) {
+    activeWatchers.push(
+      watch(
+        projectDir,
+        watchCfg,
+        // event is either 'update' or 'remove'
+        (event, file) => {
+          console.log("'%s' changed \n re-starting now", file);
+          closeWatchers();
+          const { status } = spawnSync("npm", ["run", "tsc"], {
+            stdio: "inherit",
+          });
+          process.exit(status ? 3 : 0);
+        }
+      )
+    );
+  }
+  // watch plugin dirs
+  for (const pluginDir of pluginDirs) {
+    activeWatchers.push(
+      watch(
+        pluginDir,
+        watchCfg,
+        // event is either 'update' or 'remove'
+        (event, file) => {
+          console.log("'%s' changed \n re-starting now", file);
+          closeWatchers();
+          process.exit();
+        }
+      )
+    );
+  }
+};
+
+export {
+  listenForChanges,
+  getProjectRoot,
+  getPackagesDirectory,
+  getRelevantPackages,
+  getPluginDirectories,
+  closeWatchers,
+  reactPackages,
+};

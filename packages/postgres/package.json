@@ -1,18 +1,65 @@
 {
   "name": "@saltcorn/postgres",
-  "version": "0.6.1",
+  "version": "1.7.0-beta.4",
   "description": "Postgres structures for Saltcorn, open-source no-code platform",
   "homepage": "https://saltcorn.com",
   "scripts": {
-    "test": "echo \"Error: no test specified\""
+    "test": "echo \"Error: no test specified\"",
+    "tsc": "tsc -p tsconfig.json",
+    "clean": "rm -rf ./dist/*"
   },
   "author": "Tom Nielsen",
   "license": "MIT",
-  "main": "index.js",
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./cjs/index.cjs",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./postgres": {
+      "types": "./dist/postgres.d.ts",
+      "require": "./cjs/postgres.cjs",
+      "import": "./dist/postgres.js",
+      "default": "./dist/postgres.js"
+    },
+    "./postgres.js": {
+      "types": "./dist/postgres.d.ts",
+      "require": "./cjs/postgres.cjs",
+      "import": "./dist/postgres.js",
+      "default": "./dist/postgres.js"
+    },
+    "./*.js": "./dist/*.js",
+    "./*": "./dist/*.js"
+  },
+  "typesVersions": {
+    "*": {
+      "*": [
+        "dist/*"
+      ]
+    }
+  },
+  "files": [
+    "dist/**/*",
+    "!dist/tsconfig.ref.tsbuildinfo",
+    "cjs/**/*.cjs"
+  ],
   "dependencies": {
-    "@saltcorn/db-common": "0.6.1",
-    "pg": "^8.2.1",
-    "pg-copy-streams": "^5.1.1"
+    "@saltcorn/db-common": "1.7.0-beta.4",
+    "@saltcorn/plain-date": "0.2.5",
+    "connect-pg-simple": "^9.0.1",
+    "pg": "^8.13.1",
+    "pg-copy-streams": "^6.0.6",
+    "replacestream": "4.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.7",
+    "@types/pg": "^8.11.10",
+    "@types/pg-copy-streams": "^1.2.5",
+    "@types/replacestream": "^4.0.4",
+    "typescript": "5.9.2"
   },
   "repository": "github:saltcorn/saltcorn",
   "publishConfig": {

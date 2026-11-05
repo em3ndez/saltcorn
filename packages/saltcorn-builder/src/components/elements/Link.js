@@ -6,6 +6,7 @@
 
 import React, { Fragment, useContext } from "react";
 import { useNode } from "@craftjs/core";
+import useTranslation from "../../hooks/useTranslation";
 import {
   blockProps,
   BlockSetting,
@@ -13,6 +14,7 @@ import {
   OrFormula,
   ButtonOrLinkSettingsRows,
   DynamicFontAwesomeIcon,
+  setAPropGen,
 } from "./utils";
 import optionsCtx from "../context";
 
@@ -49,27 +51,41 @@ const Link = ({
     selected,
     connectors: { connect, drag },
   } = useNode((node) => ({ selected: node.events.selected }));
-  return (
-    <span
-      className={`${textStyle} is-builder-link ${
-        selected ? "selected-node" : ""
-      } ${isFormula.text ? "text-monospace" : ""} ${link_style} ${link_size}`}
-      {...blockProps(block)}
-      ref={(dom) => connect(drag(dom))}
-      style={
-        link_style === "btn btn-custom-color"
-          ? {
-              backgroundColor: link_bgcol || "#000000",
-              borderColor: link_bordercol || "#000000",
-              color: link_textcol || "#000000",
-            }
-          : {}
-      }
-    >
-      <DynamicFontAwesomeIcon icon={link_icon} className="mr-1" />
-      {isFormula.text ? `=${text}` : text}
-    </span>
-  );
+  if (!link_style)
+    return (
+      <span
+        className={`${textStyle} is-builder-link ${
+          selected ? "selected-node" : ""
+        } ${isFormula?.text ? "font-monospace" : ""} ${block ? "d-block" : ""}`}
+        ref={(dom) => connect(drag(dom))}
+      >
+        <DynamicFontAwesomeIcon icon={link_icon} className="me-1" />
+        {isFormula?.text ? `=${text}` : text}
+      </span>
+    );
+  else
+    return (
+      <button
+        className={`${textStyle} is-builder-link ${
+          selected ? "selected-node" : ""
+        } ${isFormula?.text ? "font-monospace" : ""} ${link_style} ${link_style && link_style.includes("btn") ? "d-inline-block" : ""} ${
+          link_size || ""
+        } ${block ? "d-block" : ""}`}
+        ref={(dom) => connect(drag(dom))}
+        style={
+          link_style === "btn btn-custom-color"
+            ? {
+                backgroundColor: link_bgcol || "#000000",
+                borderColor: link_bordercol || "#000000",
+                color: link_textcol || "#000000",
+              }
+            : {}
+        }
+      >
+        <DynamicFontAwesomeIcon icon={link_icon} className="me-1" />
+        {isFormula?.text ? `=${text}` : text}
+      </button>
+    );
 };
 
 export /**
@@ -79,6 +95,7 @@ export /**
  * @subcategory components
  */
 const LinkSettings = () => {
+  const { t } = useTranslation();
   const node = useNode((node) => ({
     text: node.data.props.text,
     url: node.data.props.url,
@@ -86,14 +103,19 @@ const LinkSettings = () => {
     isFormula: node.data.props.isFormula,
     textStyle: node.data.props.textStyle,
     nofollow: node.data.props.nofollow,
+    in_modal: node.data.props.in_modal,
+    view_state_fml: node.data.props.view_state_fml,
     link_src: node.data.props.link_src,
     target_blank: node.data.props.target_blank,
     link_style: node.data.props.link_style,
     link_size: node.data.props.link_size,
+    link_title: node.data.props.link_title,
+    link_class: node.data.props.link_class,
     link_icon: node.data.props.link_icon,
     link_bgcol: node.data.props.link_bgcol,
     link_bordercol: node.data.props.link_bordercol,
     link_textcol: node.data.props.link_textcol,
+    transfer_state: node.data.props.transfer_state,
   }));
   const {
     actions: { setProp },
@@ -105,21 +127,19 @@ const LinkSettings = () => {
     nofollow,
     target_blank,
     link_src,
+    in_modal,
+    transfer_state,
+    view_state_fml,
   } = node;
   const options = useContext(optionsCtx);
-  const setAProp = (key) => (e) => {
-    if (e.target) {
-      const target_value = e.target.value;
-      setProp((prop) => (prop[key] = target_value));
-    }
-  };
+  const setAProp = setAPropGen(setProp);
   return (
     <div>
       <table className="w-100">
         <tbody>
           <tr>
             <td>
-              <label>Text to display</label>
+              <label>{t("Text to display")}</label>
             </td>
             <td>
               <OrFormula nodekey="text" {...{ setProp, isFormula, node }}>
@@ -134,37 +154,45 @@ const LinkSettings = () => {
           </tr>
           <tr>
             <td>
-              <label>Link source</label>
+              <label>{t("Link source")}</label>
             </td>
             <td>
               <select
                 value={link_src}
-                className="form-control"
-                onChange={(e) =>
+                className="form-control form-select"
+                onChange={(e) => {
+                  if (!e.target) return;
+                  const value = e.target.value;
                   setProp((prop) => {
-                    prop.link_src = e.target.value;
-                    if (e.target.value !== "URL") {
+                    prop.link_src = value;
+                    if (value !== "URL" && prop.isFormula) {
                       prop.isFormula.url = false;
                     }
-                  })
-                }
+                  });
+                }}
               >
-                <option>URL</option>
-                {(options.pages || []).length > 0 && <option>Page</option>}
+                <option value="URL">{t("URL")}</option>
+                {(options.pages || []).length > 0 && <option value="Page">{t("Page")}</option>}
                 {(options.views || []).length > 0 &&
-                  options.mode === "page" && <option>View</option>}
+                  ["page", "filter"].includes(options.mode) && (
+                    <option value="View">{t("View")}</option>
+                  )}
+                {(options.page_groups || []).length > 0 && (
+                  <option value="Page Group">{t("Page Group")}</option>
+                )}
               </select>
             </td>
           </tr>
           {link_src === "URL" && (
             <tr>
               <td>
-                <label>URL</label>
+                <label>{t("URL")}</label>
               </td>
               <td>
                 <OrFormula nodekey="url" {...{ setProp, isFormula, node }}>
                   <input
                     type="text"
+                    spellCheck={false}
                     className="form-control "
                     value={url}
                     onChange={setAProp("url")}
@@ -176,17 +204,40 @@ const LinkSettings = () => {
           {link_src === "Page" && (
             <tr>
               <td>
-                <label>Page</label>
+                <label>{t("Page")}</label>
               </td>
               <td>
                 <select
                   value={url}
-                  className="form-control"
+                  className="form-control form-select"
                   onChange={setAProp("url")}
                 >
                   <option></option>
-                  {(options.pages || []).map((p) => (
-                    <option value={`/page/${p.name}`}>{p.name}</option>
+                  {(options.pages || []).map((p, ix) => (
+                    <option key={ix} value={`/page/${p.name}`}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </td>
+            </tr>
+          )}
+          {link_src === "Page Group" && (
+            <tr>
+              <td>
+                <label>{t("Page Group")}</label>
+              </td>
+              <td>
+                <select
+                  value={url}
+                  className="form-control form-select"
+                  onChange={setAProp("url")}
+                >
+                  <option></option>
+                  {(options.page_groups || []).map((p, ix) => (
+                    <option key={ix} value={`/page/${p.name}`}>
+                      {p.name}
+                    </option>
                   ))}
                 </select>
               </td>
@@ -195,21 +246,37 @@ const LinkSettings = () => {
           {link_src === "View" && (
             <tr>
               <td>
-                <label>View</label>
+                <label>{t("View")}</label>
               </td>
               <td>
                 <select
                   value={url}
-                  className="form-control"
+                  className="form-control form-select"
                   onChange={setAProp("url")}
                 >
                   <option></option>
-                  {(options.views || []).map((p) => (
-                    <option value={`/view/${p.name}`}>
+                  {(options.views || []).map((p, ix) => (
+                    <option key={ix} value={`/view/${p.name}`}>
                       {p.name} [{p.viewtemplate}]
                     </option>
                   ))}
                 </select>
+              </td>
+            </tr>
+          )}
+          {link_src === "View" && (
+            <tr>
+              <td>
+                <label>{t("State Formula")}</label>
+              </td>
+              <td>
+                <input
+                  type="text"
+                  spellCheck={false}
+                  className="form-control"
+                  value={view_state_fml}
+                  onChange={setAProp("view_state_fml")}
+                />
               </td>
             </tr>
           )}
@@ -219,6 +286,9 @@ const LinkSettings = () => {
             btnClass="btn"
             values={node}
             linkFirst={true}
+            linkIsBlank={true}
+            allowRunOnLoad={false}
+            faIcons={options.icons}
           />
         </tbody>
       </table>
@@ -229,11 +299,9 @@ const LinkSettings = () => {
           name="block"
           type="checkbox"
           checked={nofollow}
-          onChange={(e) =>
-            setProp((prop) => (prop.nofollow = e.target.checked))
-          }
+          onChange={setAProp("nofollow", { checked: true })}
         />
-        <label className="form-check-label">Nofollow</label>
+        <label className="form-check-label">{t("Nofollow")}</label>
       </div>
       <div className="form-check">
         <input
@@ -241,14 +309,60 @@ const LinkSettings = () => {
           name="block"
           type="checkbox"
           checked={target_blank}
-          onChange={(e) =>
-            setProp((prop) => (prop.target_blank = e.target.checked))
-          }
+          onChange={setAProp("target_blank", { checked: true })}
         />
-        <label className="form-check-label">Open in new tab</label>
+        <label className="form-check-label">{t("Open in new tab")}</label>
       </div>
+      <div className="form-check">
+        <input
+          className="form-check-input"
+          name="block"
+          type="checkbox"
+          checked={in_modal}
+          onChange={setAProp("in_modal", { checked: true })}
+        />
+        <label className="form-check-label">{t("Open in popup modal?")}</label>
+      </div>
+
+      {["filter", "page"].includes(options.mode) && (
+        <div className="form-check">
+          <input
+            className="form-check-input"
+            name="block"
+            type="checkbox"
+            checked={transfer_state}
+            onChange={setAProp("transfer_state", { checked: true })}
+          />
+          <label className="form-check-label">{t("Transfer state")}</label>
+        </div>
+      )}
+
       <BlockSetting block={block} setProp={setProp} />
       <TextStyleSetting textStyle={textStyle} setProp={setProp} />
+      <table>
+        <tbody>
+          {(link_src === "Page" && url && url.startsWith("/page/")) ||
+          (link_src === "View" && url && url.startsWith("/view/")) ? (
+            <tr>
+              <td colSpan="2">
+                <a
+                  className="d-block mt-2"
+                  target="_blank"
+                  href={
+                    link_src === "Page"
+                      ? url.replace("/page/", `/pageedit/edit/`)
+                      : link_src === "View"
+                        ? url.replace("/view/", `/viewedit/config/`)
+                        : ""
+                  }
+                >
+                  {t("Configure this")} {link_src}
+                </a>
+              </td>
+            </tr>
+          ) : null}
+        </tbody>
+      </table>
     </div>
   );
 };
@@ -282,9 +396,14 @@ Link.craft = {
       "link_size",
       "link_icon",
       "link_style",
+      "link_title",
+      "link_class",
       "link_bgcol",
       "link_bordercol",
       "link_textcol",
+      "in_modal",
+      "transfer_state",
+      "view_state_fml",
     ],
   },
 };

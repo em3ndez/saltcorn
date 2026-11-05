@@ -1,0 +1,43 @@
+{
+  "name": "@saltcorn/plain-date",
+  "version": "0.2.5",
+  "description": "PlainDate: Date without time and timezone, drop-in compatible with Date",
+  "homepage": "https://github.com/saltcorn/saltcorn/tree/master/packages/plain-date",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/saltcorn/saltcorn.git",
+    "directory": "packages/plain-date"
+  },
+  "scripts": {
+    "test": "cd dist && node --test",
+    "tsc": "tsc -p tsconfig.json",
+    "clean": "rm -rf ./dist/*"
+  },
+  "type": "module",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.14.7",
+    "typescript": "5.9.2"
+  },
+  "author": "Tom Nielsen",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./cjs/index.cjs",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./*": "./dist/*.js"
+  },
+  "files": [
+    "dist/**/*",
+    "cjs/**/*",
+    "!dist/tsconfig.ref.tsbuildinfo"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

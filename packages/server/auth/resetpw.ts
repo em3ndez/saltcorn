@@ -1,0 +1,161 @@
+/**
+ * @category server
+ * @module auth/resetpw
+ * @subcategory auth
+ */
+import { getState } from "@saltcorn/data/db/state";
+import { getMailTransport, viewToEmailHtml } from "@saltcorn/data/models/email";
+import { get_base_url } from "../routes/utils.js";
+import View from "@saltcorn/data/models/view";
+import type User from "@saltcorn/data/models/user";
+import type { Req } from "@saltcorn/types/base_types";
+
+type ResetEmailOptions = {
+  creating?: boolean;
+  from_admin?: boolean;
+};
+
+/**
+ * @param {string} link
+ * @param {object} user
+ * @param {object} req
+ * @returns {void}
+ */
+const generate_email = (
+  link: string,
+  user: User,
+  req: Req,
+  options?: ResetEmailOptions
+) => {
+  const subject = options?.creating
+    ? req.__(`Welcome to %s`, getState()!.getConfig("site_name", "Saltcorn"))
+    : req.__("Reset password instructions");
+  const initial = options?.creating
+    ? req.__(
+        "We have created an account for you on %s. You can set your new password through this link: ",
+        getState()!.getConfig("site_name", "Saltcorn")
+      )
+    : options?.from_admin
+      ? req.__(
+          "We request that you change your password on %s. You can set your new password through this link: ",
+          getState()!.getConfig("site_name", "Saltcorn")
+        )
+      : req.__(
+          "You have requested a link to change your password. You can do this through this link:"
+        );
+  const base_url = getState()!.getConfig("base_url", "");
+  const final =
+    options?.creating && base_url
+      ? req.__(
+          "Use this link to access the application once you have set your password: %s",
+          `<a href="${base_url}">${base_url}</a>`
+        )
+      : "";
+  const finalTxt =
+    options?.creating && base_url
+      ? req.__(
+          "Use this link to access the application once you have set your password: %s",
+          base_url
+        )
+      : "";
+  return {
+    from: getState()!.getConfig("email_from"),
+    to: user.email,
+    subject,
+    text: `${req.__("Hi %s", user.email)},
+
+${initial}
+
+${link}
+
+${
+  !options?.creating && !options?.from_admin
+    ? req.__("If you did not request this, please ignore this email.") + "\n"
+    : ""
+}
+${req.__(
+  "Your password will not change until you access the link above and set a new one."
+)}
+
+${finalTxt}
+`,
+    html: `${req.__("Hi %s", user.email)},<br /><br />    
+  ${initial}<br />
+<br />
+<a href="${link}">${options?.creating
+    ? req.__("Set my password")
+    : req.__("Change my password")}</a><br />
+<br />
+${
+  !options?.creating && !options?.from_admin
+    ? req.__("If you did not request this, please ignore this email.") +
+      "<br />"
+    : ""
+}
+<br />
+${options?.creating ?req.__(
+  "Your account will not be usable until you access the link above and set a password."
+): req.__(
+  "Your password will not change until you access the link above and set a new one."
+)}<br />
+${final ? `<br />${final}<br />` : ""}
+`,
+  };
+};
+
+/**
+ * @param {object} user
+ * @param {object} req
+ * @returns {Promise<void>}
+ */
+const send_reset_email = async (
+  user: User,
+  req: Req,
+  options: ResetEmailOptions = {}
+) => {
+  const { link, token } = await get_reset_link(user, req);
+  const transporter = await getMailTransport();
+  const reset_password_email_view_name = getState()!.getConfig(
+    "reset_password_email_view",
+    false
+  );
+  let email;
+  if (reset_password_email_view_name) {
+    const reset_password_email_view = await View.findOne({
+      name: reset_password_email_view_name,
+    });
+    if (reset_password_email_view) {
+      const html = await viewToEmailHtml(reset_password_email_view, {
+        id: user.id,
+        _unhashed_reset_password_token: token,
+      });
+      email = {
+        from: getState()!.getConfig("email_from"),
+        to: user.email,
+        subject:
+          reset_password_email_view.attributes?.page_title ||
+          `${req.__("Hi %s", user.email)}`,
+        html,
+      };
+    }
+  }
+  if (!email) email = generate_email(link, user, req, options);
+  await transporter.sendMail(email);
+};
+
+/**
+ * @param {object} user
+ * @param {object} req
+ */
+const get_reset_link = async (user: User, req: Req) => {
+  const token = await user.getNewResetToken();
+  const base = get_base_url(req);
+  return {
+    link: `${base}auth/reset?token=${token}&email=${encodeURIComponent(
+      user.email
+    )}`,
+    token,
+  };
+};
+
+export { send_reset_email, get_reset_link, generate_email };

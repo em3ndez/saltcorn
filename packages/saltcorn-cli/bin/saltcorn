@@ -1,6 +1,18 @@
 #!/usr/bin/env node
 
-require("@oclif/command")
-  .run()
-  .then(require("@oclif/command/flush"))
-  .catch(require("@oclif/errors/handle"));
+try {
+  require("source-map-support").install({
+    handleUncaughtExceptions: false,
+  });
+} catch (error) {
+  console.log(
+    "Warning: Unable to init the 'source-map-support' module. " +
+      "I will run without it."
+  );
+  console.log("Stack traces of source-mapped files won't be formatted.");
+}
+
+(async () => {
+  const oclif = await import("@oclif/core");
+  await oclif.execute({ development: false, dir: __dirname });
+})();

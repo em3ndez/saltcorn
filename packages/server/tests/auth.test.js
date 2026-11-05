@@ -1,10 +1,14 @@
-const request = require("supertest");
-const getApp = require("../app");
-const Table = require("@saltcorn/data/models/table");
-const View = require("@saltcorn/data/models/view");
-const Field = require("@saltcorn/data/models/field");
-const User = require("@saltcorn/data/models/user");
-const {
+import { fileURLToPath as __fileURLToPath } from "url";
+import { dirname as __pathDirname } from "path";
+const __filename = __fileURLToPath(import.meta.url);
+const __dirname = __pathDirname(__filename);
+import { request as request } from "../auth/testhelp.js";
+import getApp from "../app.js";
+import Table from "@saltcorn/data/models/table";
+import View from "@saltcorn/data/models/view";
+import Field from "@saltcorn/data/models/field";
+import User from "@saltcorn/data/models/user";
+import {
   getStaffLoginCookie,
   getAdminLoginCookie,
   toRedirect,
@@ -12,19 +16,26 @@ const {
   toSucceed,
   resetToFixtures,
   toNotInclude,
-} = require("../auth/testhelp");
-const db = require("@saltcorn/data/db");
-const { getState } = require("@saltcorn/data/db/state");
-const { get_reset_link, generate_email } = require("../auth/resetpw");
-const i18n = require("i18n");
-const path = require("path");
+  resToLoginCookie,
+  succeedJsonWith,
+} from "../auth/testhelp.js";
+import db from "@saltcorn/data/db";
+import { getState } from "@saltcorn/data/db/state";
+import { get_reset_link, generate_email } from "../auth/resetpw.js";
+import i18n from "i18n";
+import path from "path";
+import fs from "fs";
+import { sleep } from "@saltcorn/data/utils";
 
-afterAll(db.close);
+afterAll(async () => {
+  await sleep(100);
+  db.close();
+});
 beforeAll(async () => {
   await resetToFixtures();
 });
 
-describe("Public auth Endpoints", () => {
+describe("AuthTest Public auth Endpoints", () => {
   it("should show login", async () => {
     const app = await getApp({ disableCsrf: true });
     await request(app)
@@ -44,7 +55,7 @@ describe("Public auth Endpoints", () => {
   });
 });
 
-describe("login process", () => {
+describe("AuthTest login process", () => {
   it("should say Login when not logged in", async () => {
     const app = await getApp({ disableCsrf: true });
     await request(app).get("/").expect(toRedirect("/auth/login"));
@@ -60,10 +71,11 @@ describe("login process", () => {
   });
 });
 
-describe("user settings", () => {
+describe("AuthTest user settings", () => {
+  let loginCookie;
   it("should show user settings", async () => {
     const app = await getApp({ disableCsrf: true });
-    const loginCookie = await getStaffLoginCookie();
+    loginCookie = await getStaffLoginCookie();
     await request(app)
       .get("/auth/settings")
       .set("Cookie", loginCookie)
@@ -72,7 +84,7 @@ describe("user settings", () => {
 
   it("should change password", async () => {
     const app = await getApp({ disableCsrf: true });
-    const loginCookie = await getStaffLoginCookie();
+    //const loginCookie = await getStaffLoginCookie();
     await request(app)
       .post("/auth/settings")
       .set("Cookie", loginCookie)
@@ -94,23 +106,59 @@ describe("user settings", () => {
       .send("email=staff@foo.com")
       .send("password=foHRrr46obar")
       .expect(toRedirect("/"));
+    //change back
+    await request(app)
+      .post("/auth/settings")
+      .set("Cookie", loginCookie)
+      .send("password=foHRrr46obar")
+      .send("new_password=ghrarhr54hg")
+      .expect(toRedirect("/auth/settings"));
   });
+  it("should needs correct old password", async () => {
+    const app = await getApp({ disableCsrf: true });
+    //const loginCookie = await getStaffLoginCookie();
+    await request(app)
+      .post("/auth/settings")
+      .set("Cookie", loginCookie)
+      .send("password=ghrarhr55hg") //wrong
+      .send("new_password=foHRrr46obar")
+      .expect(toInclude("Password does not match"))
+      .expect(200);
+    const user = await User.findOne({ email: "staff@foo.com" });
+    expect(user.checkPassword("foHRrr46obar")).toBe(false);
+    expect(user.checkPassword("ghrarhr54hg")).toBe(true);
+  });
+  it("should needs old password value", async () => {
+    const app = await getApp({ disableCsrf: true });
+    //const loginCookie = await getStaffLoginCookie();
+    await request(app)
+      .post("/auth/settings")
+      .set("Cookie", loginCookie)
+      .send("new_password=foHRrr46obar")
+      .expect(toInclude("Unable to read"))
+      .expect(200);
+    const user = await User.findOne({ email: "staff@foo.com" });
+    expect(user.checkPassword("foHRrr46obar")).toBe(false);
+    expect(user.checkPassword("ghrarhr54hg")).toBe(true);
+  });
+
   it("should change language", async () => {
     const app = await getApp({ disableCsrf: true });
-    const loginCookie = await getAdminLoginCookie();
-    await request(app)
+    const adminLoginCookie = await getAdminLoginCookie();
+    const res = await request(app)
       .post("/auth/setlanguage")
-      .set("Cookie", loginCookie)
+      .set("Cookie", adminLoginCookie)
       .send("locale=it")
       .expect(toRedirect("/auth/settings"));
+    const newCookie = resToLoginCookie(res);
     await request(app)
       .get("/auth/settings")
-      .set("Cookie", loginCookie)
+      .set("Cookie", newCookie)
       .expect(toInclude("Cambia password"));
   });
 });
 
-describe("signup process", () => {
+describe("AuthTest signup process", () => {
   it("should sign up", async () => {
     const app = await getApp({ disableCsrf: true });
     await request(app)
@@ -121,7 +169,7 @@ describe("signup process", () => {
   });
 });
 
-describe("forgot password", () => {
+describe("AuthTest forgot password", () => {
   it("should show form", async () => {
     const app = await getApp({ disableCsrf: true });
     await request(app).get("/auth/forgot/").expect(toRedirect("/auth/login"));
@@ -136,11 +184,11 @@ describe("forgot password", () => {
     const u = await User.findOne({ email: "staff1@foo.com" });
     await getState().setConfig("base_url", "/");
 
-    const link = await get_reset_link(u, {});
+    const { link } = await get_reset_link(u, {});
 
     i18n.configure({
       locales: ["en"],
-      directory: path.join(__dirname, "..", "/locales"),
+      directory: path.join(__dirname, "..", "..", "/locales"),
     });
     const email = generate_email(link, u, i18n);
     expect(email.text).toContain(link);
@@ -154,6 +202,7 @@ describe("forgot password", () => {
       .post("/auth/reset")
       .send("email=staff1@foo.com")
       .send("password=bazzRGGR65zoo")
+      .send("confirm_password=bazzRGGR65zoo")
       .send("token=" + token)
       .expect(toRedirect("/auth/login"));
     await request(app)
@@ -167,9 +216,49 @@ describe("forgot password", () => {
       .send("password=bazzRGGR65zoo")
       .expect(toRedirect("/"));
   });
+
+  it("should not accept a non-scalar email (SQL injection via inSelect)", async () => {
+    const app = await getApp({ disableCsrf: true });
+    // The extended body parser turns email[inSelect][...] into an object. If it
+    // reached User.findOne it would be interpreted as a structured Where clause
+    // (a subselect), enabling an unauthenticated SQL injection / data-exfil
+    // oracle against the users table. The request must be rejected, not run as
+    // a query, and must never crash the server (500).
+    await request(app)
+      .post("/auth/reset")
+      .send("token=aaaaaaaaaaaaaaaa")
+      .send("password=bazzRGGR65zoo")
+      .send("confirm_password=bazzRGGR65zoo")
+      .send("email[inSelect][table]=users")
+      .send("email[inSelect][field]=id")
+      .send("email[inSelect][where][id]=1")
+      .expect(toRedirect("/auth/login"));
+
+    // and the data-model boundary rejects it directly too
+    const result = await User.resetPasswordWithToken({
+      email: { inSelect: { table: "users", field: "id", where: { id: 1 } } },
+      reset_password_token: "aaaaaaaaaaaaaaaa",
+      password: "bazzRGGR65zoo",
+      confirm_password: "bazzRGGR65zoo",
+    });
+    expect(result.success).toBeUndefined();
+    expect(result.error).toBeTruthy();
+  });
+
+  it("should allow reset when forgot is disabled (admin-issued links)", async () => {
+    // Reset links are also sent by the admin when creating users, so /auth/reset
+    // must stay reachable even when self-service allow_forgot is off.
+    const app = await getApp({ disableCsrf: true });
+    await getState().setConfig("allow_forgot", false);
+    await request(app)
+      .get("/auth/reset")
+      .expect(toSucceed())
+      .expect(toInclude("Enter your new password below"));
+    await getState().setConfig("allow_forgot", true);
+  });
 });
 
-describe("user admin", () => {
+describe("AuthTest user admin", () => {
   it("should list tables", async () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
@@ -194,7 +283,7 @@ describe("user admin", () => {
       .post("/useradmin/save")
       .send("email=staff2@foo.com")
       .send("password=fideRGE54lio")
-      .send("role_id=8")
+      .send("role_id=80")
       .set("Cookie", loginCookie)
       .expect(toRedirect("/useradmin"));
   });
@@ -212,7 +301,7 @@ describe("user admin", () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     const user = await User.findOne({ email: "staff2@foo.com" });
-    expect(user.role_id).toBe(8);
+    expect(user.role_id).toBe(80);
     await request(app)
       .get(`/useradmin/${user.id}`)
       .set("Cookie", loginCookie)
@@ -227,11 +316,11 @@ describe("user admin", () => {
       .post("/useradmin/save")
       .send("email=staff2@foo.com")
       .send(`id=${user.id}`)
-      .send("role_id=4")
+      .send("role_id=40")
       .set("Cookie", loginCookie)
       .expect(toRedirect("/useradmin"));
     const edituser = await User.findOne({ email: "staff2@foo.com" });
-    expect(edituser.role_id).toBe(4);
+    expect(edituser.role_id).toBe(40);
   });
   it("tries to create new user with existing email", async () => {
     const app = await getApp({ disableCsrf: true });
@@ -240,7 +329,7 @@ describe("user admin", () => {
       .post("/useradmin/save")
       .send("email=staff2@foo.com")
       .send("password=fideRGE54lio")
-      .send("role_id=8")
+      .send("role_id=80")
       .set("Cookie", loginCookie)
       .expect(toRedirect("/useradmin"));
     const editusers = await User.find({ email: "staff2@foo.com" });
@@ -257,10 +346,68 @@ describe("user admin", () => {
     const delusers = await User.find({ email: "staff2@foo.com" });
     expect(delusers.length).toBe(0);
   });
+  if (!db.isSQLite)
+    it("can be disabled", async () => {
+      const staffLoginCookie = await getStaffLoginCookie();
+      const staffUser = await User.findOne({ email: "staff@foo.com" });
+      const adminLoginCookie = await getAdminLoginCookie();
+      const app = await getApp({ disableCsrf: true });
+      await request(app)
+        .post("/auth/login/")
+        .send("email=staff@foo.com")
+        .send("password=ghrarhr54hg")
+        .expect(toRedirect("/"));
+      await request(app)
+        .post(`/useradmin/disable/${staffUser.id}`)
+        .set("Cookie", adminLoginCookie)
+        .expect(toRedirect("/useradmin"));
+      await request(app)
+        .get("/auth/settings")
+        .set("Cookie", staffLoginCookie)
+        .expect(toRedirect("/auth/login"));
+      await request(app)
+        .post("/auth/login/")
+        .send("email=staff@foo.com")
+        .send("password=ghrarhr54hg")
+        .expect(toRedirect("/auth/login"));
+      await request(app)
+        .post(`/useradmin/enable/${staffUser.id}`)
+        .set("Cookie", adminLoginCookie)
+        .expect(toRedirect("/useradmin"));
+      await request(app)
+        .post("/auth/login/")
+        .send("email=staff@foo.com")
+        .send("password=ghrarhr54hg")
+        .expect(toRedirect("/"));
+    });
+  if (!db.isSQLite)
+    it("can be force logged out", async () => {
+      const staffLoginCookie = await getStaffLoginCookie();
+      const staffUser = await User.findOne({ email: "staff@foo.com" });
+      const adminLoginCookie = await getAdminLoginCookie();
+      const app = await getApp({ disableCsrf: true });
+      await request(app)
+        .get("/auth/settings")
+        .set("Cookie", staffLoginCookie)
+        .expect(toInclude(">staff@foo.com<"));
+      await request(app)
+        .post(`/useradmin/force-logout/${staffUser.id}`)
+        .set("Cookie", adminLoginCookie)
+        .expect(toRedirect("/useradmin"));
+      await request(app)
+        .get("/auth/settings")
+        .set("Cookie", staffLoginCookie)
+        .expect(toRedirect("/auth/login"));
+      await request(app)
+        .post("/auth/login/")
+        .send("email=staff@foo.com")
+        .send("password=ghrarhr54hg")
+        .expect(toRedirect("/"));
+    });
 });
-describe("User fields", () => {
+describe("AuthTest User fields", () => {
   it("should add fields", async () => {
-    const table = await Table.findOne({ name: "users" });
+    const table = Table.findOne({ name: "users" });
     await Field.create({
       table,
       label: "Height",
@@ -273,7 +420,7 @@ describe("User fields", () => {
       configuration: {
         columns: [
           { type: "Field", fieldview: "edit", field_name: "height" },
-          { type: "Action", minRole: 10, action_name: "Save" },
+          { type: "Action", minRole: 100, action_name: "Save" },
         ],
         layout: {
           above: [
@@ -299,11 +446,11 @@ describe("User fields", () => {
               ],
             },
             { type: "line_break" },
-            { type: "action", minRole: 10, action_name: "Save" },
+            { type: "action", minRole: 100, action_name: "Save" },
           ],
         },
       },
-      min_role: 1,
+      min_role: 100,
     });
     await getState().setConfig("new_user_form", "newuser");
   });
@@ -326,16 +473,16 @@ describe("User fields", () => {
       .send("password=seCERGERG45et")
       .send("height=191")
       .expect(toRedirect("/"));
-    const table = await Table.findOne({ name: "users" });
+    const table = Table.findOne({ name: "users" });
     const ut = await table.getRow({ email: "staff14@foo.com" });
     expect(ut.email).toBe("staff14@foo.com");
     expect(ut.height).toBe(191);
   });
 });
 
-describe("signup with custom login form", () => {
+describe("AuthTest signup with custom login form", () => {
   it("should create user fields and login form", async () => {
-    const table = await Table.findOne({ name: "users" });
+    const table = Table.findOne({ name: "users" });
     const fc = await Field.create({
       table,
       label: "Username",
@@ -397,7 +544,7 @@ describe("signup with custom login form", () => {
             {
               type: "action",
               rndid: "63f01b",
-              minRole: 10,
+              minRole: 100,
               isFormula: {},
               action_name: "Login",
               action_label: "Login",
@@ -407,7 +554,7 @@ describe("signup with custom login form", () => {
             {
               type: "action",
               rndid: "45dd57",
-              minRole: 10,
+              minRole: 100,
               isFormula: {},
               action_name: "Login with github",
               configuration: {},
@@ -420,7 +567,7 @@ describe("signup with custom login form", () => {
           {
             type: "Action",
             rndid: "63f01b",
-            minRole: 10,
+            minRole: 100,
             isFormula: {},
             action_name: "Login",
             action_label: "Login",
@@ -430,7 +577,7 @@ describe("signup with custom login form", () => {
           {
             type: "Action",
             rndid: "45dd57",
-            minRole: 10,
+            minRole: 100,
             isFormula: {},
             action_name: "Login with github",
             configuration: {},
@@ -439,7 +586,7 @@ describe("signup with custom login form", () => {
         viewname: "loginform",
         view_when_done: "publicissueboard",
       },
-      min_role: 1,
+      min_role: 100,
       //default_render_page: "loginpage",
     });
 
@@ -504,7 +651,7 @@ describe("signup with custom login form", () => {
             {
               type: "action",
               rndid: "63f01b",
-              minRole: 10,
+              minRole: 100,
               isFormula: {},
               action_name: "Sign up",
               action_style: "btn-primary",
@@ -519,7 +666,7 @@ describe("signup with custom login form", () => {
           {
             type: "Action",
             rndid: "63f01b",
-            minRole: 10,
+            minRole: 100,
             isFormula: {},
             action_name: "Sign up",
             action_style: "btn-primary",
@@ -529,7 +676,7 @@ describe("signup with custom login form", () => {
         viewname: "loginform",
         view_when_done: "publicissueboard",
       },
-      min_role: 1,
+      min_role: 100,
       //default_render_page: "signuppage",
     });
     await getState().setConfig("signup_form", "signupform");
@@ -593,12 +740,268 @@ describe("signup with custom login form", () => {
       .send("height=15")
       .expect(toRedirect("/"));
 
-    const table = await Table.findOne({ name: "users" });
+    const table = Table.findOne({ name: "users" });
     const user = await User.findOne({ email: "staff8@foo.com" });
     expect(!!user).toBe(true);
     expect(user.checkPassword("seCERRG45et")).toBe(true);
     const userrow = await table.getRow({ email: "staff8@foo.com" });
     expect(userrow.username).toBe("staffOfTheMonth");
     expect(userrow.height).toBe(15);
+  });
+});
+
+describe("AuthTest Locale files", () => {
+  it("should be valid JSON", async () => {
+    const localeFiles = await fs.promises.readdir(
+      path.join(__dirname, "..", "..", "/locales")
+    );
+    expect(localeFiles.length).toBeGreaterThan(3);
+    expect(localeFiles).toContain("en.json");
+    for (const fnm of localeFiles) {
+      const conts = await fs.promises.readFile(
+        path.join(__dirname, "..", "..", "/locales", fnm)
+      );
+      expect(conts.length).toBeGreaterThan(1);
+
+      const j = JSON.parse(conts);
+      expect(Object.keys(j).length).toBeGreaterThan(1);
+    }
+  });
+});
+
+describe("AuthTest Allowed login methods", () => {
+  it("can login with password", async () => {
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .post("/auth/login/")
+      .send("email=staff@foo.com")
+      .send("password=ghrarhr54hg")
+      .expect(toRedirect("/"));
+  });
+  it("can disable password login", async () => {
+    const adminLoginCookie = await getAdminLoginCookie();
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .post("/roleadmin/setrole_allowed_auth_methods/40")
+      .set("Cookie", adminLoginCookie)
+      .send({
+        enabled: false,
+        method: "Password",
+      })
+      .expect(succeedJsonWith(() => true));
+  });
+  it("cannot login with password", async () => {
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .post("/auth/login/")
+      .send("email=staff@foo.com")
+      .send("password=ghrarhr54hg")
+      .expect(toRedirect("/auth/login"));
+  });
+});
+
+describe("Session login rate limiting", () => {
+  it("should rate-limit POST /auth/login-with/session after repeated failed attempts", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const headers = {
+      "X-Requested-With": "XMLHttpRequest",
+      "X-Saltcorn-Client": "mobile-app",
+    };
+    let rateLimited = false;
+    for (let i = 0; i < 10; i++) {
+      const res = await request(app)
+        .post("/auth/login-with/session")
+        .set(headers)
+        .send({ email: "user@foo.com", password: `wrongpassword${i}` });
+
+      if (res.statusCode === 429 || res.headers["x-ratelimit-redirect"]) {
+        rateLimited = true;
+        break;
+      }
+    }
+    expect(rateLimited).toBe(true);
+  });
+});
+
+describe("Disabled user login rejection", () => {
+  let testUserEmail = "disabled-login-test@foo.com";
+  let testUserPassword = "TestPassword123!";
+
+  beforeAll(async () => {
+    // Create a test user and then disable them
+    const existingUser = await User.findOne({ email: testUserEmail });
+    if (existingUser) {
+      await existingUser.update({ disabled: false });
+      await existingUser.delete();
+    }
+    const u = await User.create({
+      email: testUserEmail,
+      password: testUserPassword,
+      role_id: 80,
+    });
+    // Disable the user
+    await u.update({ disabled: true });
+  });
+
+  afterAll(async () => {
+    // Clean up
+    const u = await User.findOne({ email: testUserEmail });
+    if (u) {
+      await u.update({ disabled: false });
+      await u.delete();
+    }
+  });
+
+  it("should reject disabled user on normal login", async () => {
+    const app = await getApp({ disableCsrf: true });
+    // Normal login should fail for disabled user - redirects back to login
+    await request(app)
+      .post("/auth/login/")
+      .send(`email=${testUserEmail}`)
+      .send(`password=${testUserPassword}`)
+      .expect(toRedirect("/auth/login"));
+  });
+
+  it("should reject disabled user on session login", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const headers = {
+      "X-Requested-With": "XMLHttpRequest",
+      "X-Saltcorn-Client": "mobile-app",
+    };
+    const res = await request(app)
+      .post("/auth/login-with/session")
+      .set(headers)
+      .send({ email: testUserEmail, password: testUserPassword });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.body?.success).toBeFalsy();
+  });
+});
+
+describe("API token disabled user bypass", () => {
+  let testUserEmail = "disabled-apitoken-test@foo.com";
+  let testUserPassword = "TestPassword456!";
+  let apiToken;
+
+  beforeAll(async () => {
+    // Clean up any leftover user from a previous run
+    const existingUser = await User.findOne({ email: testUserEmail });
+    if (existingUser) {
+      await existingUser.update({ disabled: false });
+      await existingUser.delete();
+    }
+    // Create a user, generate an API token, then disable them
+    const u = await User.create({
+      email: testUserEmail,
+      password: testUserPassword,
+      role_id: 80,
+    });
+    apiToken = await u.getNewAPIToken();
+  });
+
+  afterAll(async () => {
+    const u = await User.findOne({ email: testUserEmail });
+    if (u) {
+      await u.update({ disabled: false });
+      await u.delete();
+    }
+  });
+
+  it("should allow API token access to rooms for enabled user", async () => {
+    const app = await getApp({ disableCsrf: true });
+    // rooms table has min_role_read=80 (user role) - our user (role 80) can read it
+    const res = await request(app)
+      .get("/api/rooms/")
+      .set("Authorization", "Bearer " + apiToken);
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBeTruthy();
+  });
+
+  it("should reject API token access for disabled user", async () => {
+    // Disable the user
+    const u = await User.findOne({ email: testUserEmail });
+    await u.update({ disabled: true });
+
+    const app = await getApp({ disableCsrf: true });
+    // rooms table has min_role_read=80 (user). Our disabled user has role 80,
+    // so their token would grant access if the disabled check is missing.
+    // Public users (role 100) cannot read rooms.
+    // A disabled user's API token should NOT grant authenticated access.
+    const res = await request(app)
+      .get("/api/rooms/")
+      .set("Authorization", "Bearer " + apiToken);
+    const body = res.body;
+    // Should NOT succeed - a disabled user should not have user-level access
+    expect(body.success).toBeFalsy();
+  });
+});
+
+describe("TOTP brute force protection", () => {
+  let testUserEmail = "totp-bruteforce-test@foo.com";
+  let testUserPassword = "TotpBrute789!";
+  let totpKey = "abcdefghij";
+
+  beforeAll(async () => {
+    // Create a user with TOTP enabled
+    const existingUser = await User.findOne({ email: testUserEmail });
+    if (existingUser) {
+      await existingUser.update({ disabled: false });
+      await existingUser.delete();
+    }
+    const u = await User.create({
+      email: testUserEmail,
+      password: testUserPassword,
+      role_id: 80,
+    });
+    // Enable TOTP with a known key
+    u._attributes.totp_enabled = true;
+    u._attributes.totp_key = totpKey;
+    await u.update({ _attributes: u._attributes });
+  });
+
+  afterAll(async () => {
+    const u = await User.findOne({ email: testUserEmail });
+    if (u) {
+      u._attributes.totp_enabled = false;
+      delete u._attributes.totp_key;
+      await u.update({ _attributes: u._attributes, disabled: false });
+      await u.delete();
+    }
+  });
+
+  it("should rate-limit TOTP login attempts after repeated failures", async () => {
+    const app = await getApp({ disableCsrf: true });
+
+    // Step 1: Login with correct password to get session with pending_user
+    const loginRes = await request(app)
+      .post("/auth/login/")
+      .send(`email=${testUserEmail}`)
+      .send(`password=${testUserPassword}`);
+    expect(loginRes.headers["location"]).toBe("/auth/twofa/login/totp");
+
+    const sessionCookie = resToLoginCookie(loginRes);
+
+    // Step 2: Send many wrong TOTP codes.
+    // The POST /auth/login endpoint is rate-limited (ipLimiter + userLimiter),
+    // but POST /auth/twofa/login/totp has NO rate limiting at all.
+    // This allows an attacker who knows the password to brute-force the 6-digit
+    // TOTP code (1,000,000 possibilities) without any throttling.
+    // The TOTP endpoint should have rate limiting just like the login endpoint.
+    let rateLimited = false;
+    for (let i = 0; i < 10; i++) {
+      const res = await request(app)
+        .post("/auth/twofa/login/totp")
+        .set("Cookie", sessionCookie)
+        .send(`code=${100000 + i}`);
+
+      if (res.statusCode === 429 || res.headers["x-ratelimit-redirect"]) {
+        rateLimited = true;
+        break;
+      }
+    }
+
+    // This SHOULD be rate-limited to prevent TOTP brute-force attacks.
+    // Currently fails because the endpoint has no rate limiting.
+    expect(rateLimited).toBe(true);
   });
 });

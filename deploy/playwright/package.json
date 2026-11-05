@@ -1,0 +1,19 @@
+{
+  "name": "saltcorn-playwright",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "npx playwright test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "1.62.0",
+    "@types/node": "^20.14.11"
+  },
+  "dependencies": {
+    "playwright": "1.62.0"
+  }
+}

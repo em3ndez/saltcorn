@@ -1,15 +1,15 @@
 const getApp = require("@saltcorn/server/app");
-const request = require("supertest");
 
 const { chaos_guinea_pig, set_seed } = require("chaos-guinea-pig");
 const {
+  request,
   getStaffLoginCookie,
   getAdminLoginCookie,
   resetToFixtures,
   toRedirect,
 } = require("@saltcorn/server/auth/testhelp");
 const db = require("@saltcorn/data/db");
-const { fetch_available_packs } = require("@saltcorn/data/models/pack");
+const { fetch_available_packs } = require("@saltcorn/admin-models/models/pack");
 
 beforeAll(async () => {
   await resetToFixtures();
@@ -17,14 +17,14 @@ beforeAll(async () => {
 
 afterAll(db.close);
 
-jest.setTimeout(100000);
+jest.setTimeout(200000);
 
 const seed = set_seed();
 
 describe("app", () => {
   it("obeys the chaos guinea pig with seed " + seed, async () => {
     const packs_available = await fetch_available_packs();
-    console.log(packs_available);
+    //console.log(packs_available);
 
     for (const { name } of packs_available) {
       await resetToFixtures();

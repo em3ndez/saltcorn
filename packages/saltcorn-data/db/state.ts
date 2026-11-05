@@ -1,0 +1,2181 @@
+/**
+ * State of Saltcorn
+ * Keeps cache for main objects
+ * @category saltcorn-data
+ * @module db/state
+ * @subcategory db
+ */
+
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+// `today` is captured into each State's function_context at construction time,
+// and the root State singleton is constructed while this module is evaluated.
+// models/expression and db/state import each other, so the imported `today`
+// binding can still be in its temporal dead zone at that point. Wrap it so the
+// binding is only dereferenced when the function is actually called (by which
+// time expression has finished evaluating).
+import { today as _today } from "../models/expression.js";
+import { Evaluator } from "../evaluator.js";
+const today = (...args: any[]): any => _today(...args);
+import livePluginManagerPkg from "live-plugin-manager";
+import vm2Pkg from "vm2";
+import modulePkg from "module";
+import emergency_layout from "@saltcorn/markup/emergency_layout";
+import oldVm from "vm";
+import Model from "../models/model.js";
+import fetch from "node-fetch";
+import bufferPkg from "buffer/index.js";
+import * as nsMigrate from "../migrate.js";
+import View from "../models/view.js";
+import Trigger from "../models/trigger.js";
+import File from "../models/file.js";
+import Table from "../models/table.js";
+import TableConstraint from "../models/table_constraints.js";
+import Page from "../models/page.js";
+import PageGroup from "../models/page_group.js";
+import Field from "../models/field.js";
+import {
+  Plugin,
+  PluginLayout,
+  ViewTemplate,
+  MobileConfig,
+  PluginRoute,
+  Header,
+  PluginFunction,
+  TableProvider,
+  FileImporter,
+  FileExporter,
+  ModelPattern,
+  FieldView,
+  Action,
+  AuthenticationMethod,
+  CopilotSkill,
+  CapacitorPlugin,
+  AuthorizeAccessKind,
+  AuthorizeAccessRequestBase,
+  AuthorizeAccessViewRequest,
+  AuthorizeAccessPageRequest,
+  AuthorizeAccessTriggerRequest,
+  AuthorizeAccessResult,
+  AuthorizeAccessViewHook,
+  AuthorizeAccessPageHook,
+  AuthorizeAccessTriggerHook,
+  AuthorizeAccessApiHook,
+} from "@saltcorn/types/base_types";
+import { GenObj, Type } from "@saltcorn/types/common_types";
+import type { ConfigTypes, SingleConfig } from "../models/config.js";
+import User from "../models/user.js";
+const { PluginManager } = livePluginManagerPkg;
+
+import moment from "moment";
+
+import db from "./index.js";
+import { migrate } from "../migrate.js"; // Shows the true args and return type
+// const { migrate } = nsMigrate; // Shows the args and return type as 'any'
+import {
+  getAllConfig,
+  setConfig,
+  deleteConfig,
+  configTypes,
+} from "../models/config.js";
+import {
+  structuredClone,
+  removeAllWhiteSpace,
+  stringToJSON,
+  sleep,
+  interpolate,
+  isNode,
+  flatEqual,
+} from "../utils.js";
+import I18n from "i18n";
+import momentTz from "moment-timezone";
+const { tz } = momentTz;
+import { join, extname } from "path";
+import { existsSync } from "fs";
+import { writeFile, mkdir } from "fs/promises";
+const { VM } = vm2Pkg;
+// Intrinsics that vm2 exposes on a VM sandbox and which must not leak out of a
+// code-page VM into the shared codepage_context (see refresh_codepages).
+const vmSandboxIntrinsics = new Set(["eval", "Function", "global", "globalThis"]);
+import faIcons from "./fa5-icons.js";
+import { AbstractTable } from "@saltcorn/types/model-abstracts/abstract_table";
+import { AbstractRole } from "@saltcorn/types/model-abstracts/abstract_role";
+import MetaData from "../models/metadata.js";
+import { PushMessageHelper } from "../models/internal/push_message_helper.js";
+import { UserLike } from "@saltcorn/db-common/dbtypes";
+import PlainDate from "@saltcorn/plain-date";
+import { AbstractUser } from "@saltcorn/types/model-abstracts/abstract_user";
+
+/**
+ * @param v
+ */
+const process_send = (v: any) => {
+  if (!process.send) console.log("warning: there is no process send");
+
+  if (process.send) process.send(v);
+};
+
+const standard_fonts = {
+  Arial: "Arial, Helvetica Neue, Helvetica, sans-serif",
+  Baskerville:
+    "Baskerville, Baskerville Old Face, Garamond, Times New Roman, serif",
+  "Bodoni MT":
+    "Bodoni MT, Bodoni 72, Didot, Didot LT STD, Hoefler Text, Garamond, Times New Roman, serif",
+  Calibri: "Calibri, Candara, Segoe, Segoe UI, Optima, Arial, sans-serif",
+  "Calisto MT":
+    "Calisto MT, Bookman Old Style, Bookman, Goudy Old Style, Garamond, Hoefler Text, Bitstream Charter, Georgia, serif",
+  Cambria: "Cambria, Georgia, serif",
+  Candara: "Candara, Calibri, Segoe, Segoe UI, Optima, Arial, sans-serif",
+  "Century Gothic": "Century Gothic, CenturyGothic, AppleGothic, sans-serif",
+  Consolas: "Consolas, monaco, monospace",
+  "Copperplate Gothic": "Copperplate, Copperplate Gothic Light, fantasy",
+  "Courier New":
+    "Courier New, Courier, Lucida Sans Typewriter, Lucida Typewriter, monospace",
+  "Dejavu Sans": "Dejavu Sans, Arial, Verdana, sans-serif",
+  Didot:
+    "Didot, Didot LT STD, Hoefler Text, Garamond, Calisto MT, Times New Roman, serif",
+  "Franklin Gothic": "Franklin Gothic, Arial Bold",
+  Garamond:
+    "Garamond, Baskerville, Baskerville Old Face, Hoefler Text, Times New Roman, serif",
+  Georgia: "Georgia, Times, Times New Roman, serif",
+  "Gill Sans": "Gill Sans, Gill Sans MT, Calibri, sans-serif",
+  "Goudy Old Style":
+    "Goudy Old Style, Garamond, Big Caslon, Times New Roman, serif",
+  Helvetica: "Helvetica Neue, Helvetica, Arial, sans-serif",
+  Impact:
+    "Impact, Charcoal, Helvetica Inserat, Bitstream Vera Sans Bold, Arial Black, sans serif",
+  "Lucida Bright": "Lucida Bright, Georgia, serif",
+  "Lucida Sans": "Lucida Sans, Helvetica, Arial, sans-serif",
+  Optima: "Optima, Segoe, Segoe UI, Candara, Calibri, Arial, sans-serif",
+  Palatino:
+    "Palatino, Palatino Linotype, Palatino LT STD, Book Antiqua, Georgia, serif",
+  Perpetua:
+    "Perpetua, Baskerville, Big Caslon, Palatino Linotype, Palatino, serif",
+  Rockwell:
+    "Rockwell, Courier Bold, Courier, Georgia, Times, Times New Roman, serif",
+  "Segoe UI":
+    "Segoe UI, Frutiger, Dejavu Sans, Helvetica Neue, Arial, sans-serif",
+  Tahoma: "Tahoma, Verdana, Segoe, sans-serif",
+  "Trebuchet MS":
+    "Trebuchet MS, Lucida Grande, Lucida Sans Unicode, Lucida Sans, sans-serif",
+  Verdana: "Verdana, Geneva, sans-serif",
+};
+
+const get_standard_icons = () => {
+  const icons = [...faIcons];
+  icons.push(
+    "unicode-2605-black-star",
+    "unicode-2606-white-star",
+    "unicode-2608-thunderstorm"
+  );
+  return icons;
+};
+
+const myMoment: Function = (...args: any[]) =>
+  moment(
+    ...args.map((d) =>
+      d && (d instanceof PlainDate || d?.constructor?.name === "PlainDate")
+        ? d.toDate()
+        : d
+    )
+  );
+
+type AnyAuthorizeAccessHook = (
+  request: any,
+  user: any
+) =>
+  | Promise<AuthorizeAccessResult | null | undefined>
+  | AuthorizeAccessResult
+  | null
+  | undefined;
+
+/**
+ * State Class
+ * @category saltcorn-data
+ */
+class State {
+  tenant: string;
+  views: Array<View>;
+  triggers: Array<Trigger>;
+  virtual_triggers: Array<Trigger>;
+  viewtemplates: Record<string, ViewTemplate>;
+  modelpatterns: Record<string, ModelPattern>;
+  tables: Array<Table>;
+  types: Record<string, Type>;
+  stashed_fieldviews: Record<string, Record<string, FieldView>>;
+  pages: Array<Page>;
+  page_groups: Array<PageGroup>;
+  fields: Array<Field>;
+  configs: ConfigTypes;
+  fileviews: Record<string, FieldView>;
+  actions: Record<string, Action>;
+  auth_methods: Record<string, AuthenticationMethod>;
+  plugins: Record<string, Plugin>;
+  table_providers: Record<string, TableProvider>;
+  importers: Record<string, FileImporter>;
+  exporters: Record<string, FileExporter>;
+  plugin_cfgs: Record<string, any>;
+  plugin_locations: any;
+  plugin_module_names: any;
+  plugin_routes: Record<string, Array<PluginRoute>>;
+  routesChangedCb?: Function;
+  eventTypes: Record<string, { hasChannel: boolean; name?: string }>;
+  fonts: Record<string, string>;
+  iconSet: Set<string>;
+  layouts: Record<string, PluginLayout>;
+  userLayouts: Record<string, PluginLayout & { config: GenObj }>;
+  headers: Record<string, Array<Header>>;
+  assets_by_role: Record<string, Array<Header>>;
+  roles: Array<AbstractRole>;
+  function_context: Record<string, Function>;
+  codepage_context: Record<string, unknown>;
+  private _evaluator?: Evaluator;
+  plugins_cfg_context: any;
+  functions: Record<string, Function | PluginFunction>;
+  keyFieldviews: Record<string, FieldView>;
+  external_tables: Record<string, AbstractTable>;
+  verifier: any;
+  i18n: I18n.I18n;
+  mobileConfig?: MobileConfig;
+  logLevel: number;
+  pluginManager?: any;
+  codeNPMmodules: Record<string, any>;
+  npm_refresh_in_progess: boolean;
+  hasJoinedLogSockets: boolean;
+  hasJoinedDynamicUpdateSockets: boolean;
+  hasJoinedCollabSockets: boolean;
+  queriesCache?: Record<string, any>;
+  scVersion: string;
+  waitingWorkflows?: boolean;
+  keyframes: Array<string>;
+  copilot_skills: Array<CopilotSkill>;
+  capacitorPlugins: Array<CapacitorPlugin>;
+  exchange: Record<string, Array<unknown>>;
+  // keyed by plugin name so re-registering replaces the old hook instead of duplicating it
+  authorize_view_hooks: Record<string, AuthorizeAccessViewHook>;
+  authorize_page_hooks: Record<string, AuthorizeAccessPageHook>;
+  authorize_trigger_hooks: Record<string, AuthorizeAccessTriggerHook>;
+  authorize_api_hooks: Record<string, AuthorizeAccessApiHook>;
+  sendMessageToWorkers?: Function;
+  mobile_push_handler: Record<string, Function>;
+  pushHelper?: PushMessageHelper;
+  nodeHandles: Map<string, (payload?: any) => void>;
+
+  private oldCodePages: Record<string, string> | undefined;
+
+  /**
+   * State constructor
+   * @param {string} tenant description
+   */
+  constructor(tenant: string) {
+    this.tenant = tenant;
+    this.views = [];
+    this.triggers = [];
+    this.virtual_triggers = [];
+    this.viewtemplates = {};
+    this.modelpatterns = {};
+    this.tables = [];
+    this.types = {};
+    this.stashed_fieldviews = {};
+    this.pages = [];
+    this.page_groups = [];
+    this.fields = [];
+    this.configs = {};
+    this.fileviews = {};
+    this.actions = {};
+    this.auth_methods = {};
+    this.plugins = {};
+    this.plugin_cfgs = {};
+    this.plugin_locations = {};
+    this.plugin_module_names = {};
+    this.plugin_routes = {};
+    this.table_providers = {};
+    this.importers = {};
+    this.exporters = {};
+    this.copilot_skills = [];
+    this.eventTypes = {};
+    this.fonts = standard_fonts;
+    this.iconSet = new Set(get_standard_icons());
+    this.layouts = { emergency: emergency_layout as any };
+    this.userLayouts = {};
+    this.headers = {};
+    this.roles = [];
+    this.assets_by_role = {};
+    this.function_context = { moment: myMoment, today, slugify: db.slugify };
+    this.functions = { moment: myMoment, today, slugify: db.slugify };
+    this.plugins_cfg_context = {};
+    this.keyFieldviews = {};
+    this.external_tables = {};
+    this.exchange = {};
+    this.authorize_view_hooks = {};
+    this.authorize_page_hooks = {};
+    this.authorize_trigger_hooks = {};
+    this.authorize_api_hooks = {};
+    this.verifier = null;
+    this.i18n = new I18n.I18n();
+    this.i18n.configure({
+      locales: [],
+      staticCatalog: {},
+      mustacheConfig: { disable: true },
+    });
+    this.logLevel = 1;
+    this.codeNPMmodules = {};
+    this.npm_refresh_in_progess = false;
+    this.hasJoinedLogSockets = false;
+    this.hasJoinedDynamicUpdateSockets = false;
+    this.hasJoinedCollabSockets = false;
+    this.nodeHandles = new Map();
+    try {
+      this.scVersion = require("../../package.json").version;
+    } catch (e) {
+      this.scVersion = require("../package.json").version;
+    }
+    this.codepage_context = {};
+    this.waitingWorkflows = true; //not sure so check
+    this.keyframes = [
+      "fadeIn",
+      "fadeInLeft",
+      "fadeInRight",
+      "fadeInUp",
+      "fadeInDown",
+      "rollIn",
+      "zoomIn",
+      "zoomInUp",
+      "bounce",
+      "tada",
+    ];
+    this.capacitorPlugins = [];
+    this.mobile_push_handler = {};
+  }
+
+  async computeAssetsByRole() {
+    this.assets_by_role = {};
+    let roleIds: number[] = [];
+    await this.ensure_has_roles();
+    const roles = this.roles;
+    roleIds = roles.map((r) => +r.id).filter((n: number) => !Number.isNaN(n));
+
+    if (!roleIds.includes(100)) roleIds.push(100);
+    for (const rid of roleIds) this.assets_by_role[rid] = [];
+
+    const allHeaders = Object.values(this.headers).flat();
+    for (const h of allHeaders) {
+      if (!h.onlyViews && !h.onlyFieldviews) {
+        for (const rid of roleIds) this.assets_by_role[rid].push(h);
+        continue;
+      }
+
+      const onlyViews = h.onlyViews
+        ? Array.isArray(h.onlyViews)
+          ? h.onlyViews
+          : [h.onlyViews]
+        : [];
+
+      const onlyFieldviews = h.onlyFieldviews
+        ? Array.isArray(h.onlyFieldviews)
+          ? h.onlyFieldviews
+          : [h.onlyFieldviews]
+        : [];
+
+      const matchedViews = this.views.filter((v) => {
+        if (onlyViews.length) {
+          const tmplName = v.viewtemplateObj?.name || v.viewtemplate;
+          if (
+            onlyViews.includes(tmplName) ||
+            onlyViews.includes(v.viewtemplate)
+          )
+            return true;
+        }
+        if (onlyFieldviews.length) {
+          const columns = Array.isArray(v.configuration?.columns)
+            ? v.configuration!.columns
+            : [];
+          const colFieldviews = columns
+            .map(
+              (col: {
+                type: string; // "Field" | "Action"
+                field_name: string;
+                fieldview: string;
+                configuration: any;
+              }) => (col?.type === "Field" ? col.fieldview : null)
+            )
+            .filter((fv: string) => !!fv);
+          if (colFieldviews.some((fv: string) => onlyFieldviews.includes(fv)))
+            return true;
+        }
+        return false;
+      });
+
+      for (const v of matchedViews) {
+        const min_role = +(v.min_role ?? 100);
+        for (const rid of roleIds) {
+          if (rid <= min_role) this.assets_by_role[rid].push(h);
+        }
+      }
+    }
+
+    for (const ridStr of Object.keys(this.assets_by_role)) {
+      const rid = +ridStr;
+      this.assets_by_role[rid] = Array.from(new Set(this.assets_by_role[rid]));
+    }
+  }
+
+  processSend(v: any) {
+    if (!process.send) {
+      if (this.sendMessageToWorkers) this.sendMessageToWorkers(v);
+      else if (singleton.sendMessageToWorkers)
+        singleton.sendMessageToWorkers(v);
+      //else console.warn("nowhere to send msg", v);
+    } else process_send(v);
+  }
+
+  /**
+   * Get Layout by user
+   * Based on role of user
+   * @param {object} user
+   * @returns {object}
+   */
+  getLayout(
+    user?: UserLike | AbstractUser | User
+  ): PluginLayout & { config: GenObj } {
+    // first, try if role set
+    const role_id = user ? +user.role_id : 100;
+    const layout_by_role = this.getConfig("layout_by_role");
+    if (layout_by_role && layout_by_role[role_id]) {
+      const pluginName = layout_by_role[role_id];
+      const chosen = this.layouts[layout_by_role[role_id]];
+
+      if (chosen) {
+        if (
+          user?.email &&
+          this.userLayouts[user.email] &&
+          this.userLayouts[user.email].pluginName === pluginName
+        )
+          return this.userLayouts[user.email];
+        return {
+          ...chosen,
+          pluginName,
+          config: this.plugin_cfgs[layout_by_role[role_id]],
+        };
+      }
+    }
+
+    //if there is a user layout
+    if (user?.email && this.userLayouts[user.email])
+      return this.userLayouts[user.email];
+
+    const withRenderBody = (
+      layouts: [string, PluginLayout][]
+    ): PluginLayout & { config: GenObj } => {
+      for (let i = layouts.length - 1; i >= 0; i--)
+        if (layouts[i][1].renderBody)
+          return {
+            ...layouts[i][1],
+            config: this.plugin_cfgs[layouts[i][0]],
+          };
+      throw new Error("No layout with renderBody found");
+    };
+
+    //last installed
+    const layoutvs = Object.entries(this.layouts);
+    const layout = isNode()
+      ? {
+          ...layoutvs[layoutvs.length - 1][1],
+          config: this.plugin_cfgs[layoutvs[layoutvs.length - 1][0]],
+        }
+      : withRenderBody(layoutvs);
+    return layout;
+  }
+
+  getLayoutPlugin(user?: UserLike): Plugin {
+    //try this for consistency
+    const { pluginName } = this.getLayout(user);
+    if (pluginName) {
+      let plugin = this.plugins[pluginName];
+      if (!plugin) plugin = this.plugins[this.plugin_module_names[pluginName]];
+      if (plugin) return plugin;
+    }
+
+    // legacy follows TODO we probably dont need this
+    if (user?._attributes?.layout) {
+      const pluginName = user._attributes.layout.plugin;
+      let plugin = this.plugins[pluginName];
+      if (!plugin) plugin = this.plugins[this.plugin_module_names[pluginName]];
+      if (plugin) return plugin;
+      else
+        this.log(
+          5,
+          `Warning: ${user.email} layout plugin ${pluginName} not found`
+        );
+    }
+    const role_id = user ? +user.role_id : 100;
+    const layout_by_role = this.getConfig("layout_by_role");
+    if (layout_by_role && layout_by_role[role_id]) {
+      const chosen = this.plugins[layout_by_role[role_id]];
+      if (chosen) return chosen;
+    }
+    const layoutvs = Object.keys(this.layouts);
+    const name = layoutvs[layoutvs.length - 1];
+    return this.plugins[name];
+  }
+
+  // TODO auto is poorly supported
+  getLightDarkMode(user?: AbstractUser): "dark" | "light" | "auto" {
+    const { config } = this.getLayout(user);
+    if (config?.mode) return config.mode;
+
+    return "light";
+  }
+
+  /**
+   * Get Two factor authentication policy
+   * Based on role of user
+   * @param {object} user
+   * @returns {string}
+   */
+  get2FApolicy(user: AbstractUser) {
+    const role_id = user ? +user.role_id : 100;
+    const twofa_policy_by_role = this.getConfig("twofa_policy_by_role");
+    if (twofa_policy_by_role && twofa_policy_by_role[role_id])
+      return twofa_policy_by_role[role_id];
+    else return "Optional";
+  }
+
+  /**
+   * Logging to console
+   *
+   * @param min_level
+   * @param msg
+   */
+  log(min_level: number, ...msgs: any[]) {
+    if (min_level <= this.logLevel) {
+      const ten = db.getTenantSchema();
+      if (ten !== "public") msgs.unshift(`Tenant=${ten}`);
+      if (min_level === 1) console.error(...msgs);
+      else console.log(...msgs);
+      const msg = msgs
+        .map((m) =>
+          typeof m === "string" ? m : m?.toString ? m.toString() : `${m}`
+        )
+        .join(" ");
+      this.emitLog(ten, min_level, msg);
+    }
+  }
+
+  /**
+   * Get all config variables list
+   * If variable is not defined that default value is used
+   * @function
+   * @returns {Promise<object>}
+   */
+  async getAllConfigOrDefaults(): Promise<ConfigTypes> {
+    let cfgs: ConfigTypes = {};
+    const cfgInDB = await getAllConfig();
+    if (cfgInDB)
+      Object.entries(configTypes).forEach(
+        ([key, v]: [key: string, v: SingleConfig]) => {
+          const value =
+            typeof cfgInDB[key] === "undefined" ? v.default : cfgInDB[key];
+          if (!this.isFixedConfig(key)) cfgs[key] = { value, ...v };
+        }
+      );
+    // special case: if search_use_websearch is not set, set it here
+    if (
+      cfgInDB &&
+      typeof cfgInDB.search_use_websearch === "undefined" &&
+      db.driverName === "postgres"
+    ) {
+      const dbversion = await db.getVersion(true);
+      const val = +dbversion >= 11.0;
+      await setConfig("search_use_websearch", val);
+      cfgs.search_use_websearch.value = true;
+    }
+    return cfgs;
+  }
+
+  /**
+   * Returns true if key is defined in fixed_configuration for tenant
+   * @param {string} key
+   * @returns {boolean}
+   */
+  isFixedPluginConfig(plugin_name: string, key: string): boolean {
+    return (
+      typeof db.connectObj.fixed_plugin_configuration?.[plugin_name]?.[key] !==
+      "undefined"
+    );
+  }
+
+  /**
+   * Returns true if key is defined in fixed_configuration for tenant
+   * @param {string} key
+   * @returns {boolean}
+   */
+  isFixedConfig(key: string): boolean {
+    return (
+      typeof db.connectObj.fixed_configuration[key] !== "undefined" ||
+      (db.getTenantSchema() !== db.connectObj.default_schema &&
+        (db.connectObj.inherit_configuration.includes(key) ||
+          //TODO why do we need || "" - dont understand
+          (singleton.getConfig("tenant_inherit_cfgs", "") || "")
+            .split(",")
+            .map((k: string) => k.trim())
+            .includes(key)))
+    );
+  }
+  /**
+   * Refresh State cache for all Saltcorn main objects
+   * @param noSignal - Do not signal - refresh to other cluster processes.
+   * @param keepUnchanged - Some members don't need rebuilding if they did not change
+   */
+  async refresh(noSignal?: boolean, keepUnchanged?: boolean) {
+    await this.refresh_roles(noSignal);
+    await this.refresh_tables(noSignal);
+    await this.refresh_views(noSignal);
+    await this.refresh_triggers(noSignal);
+    await this.refresh_pages(noSignal);
+    await this.refresh_page_groups(noSignal);
+    await this.refresh_config(noSignal);
+    await this.refresh_npmpkgs(noSignal);
+    await this.refresh_codepages(noSignal, keepUnchanged);
+  }
+
+  /**
+   * Refresh config
+   * @param {boolean} noSignal - Do not signal refresh to other cluster processes.
+   * @returns {Promise<void>}
+   */
+  async refresh_config(noSignal?: boolean) {
+    this.configs = await this.getAllConfigOrDefaults();
+    this.getConfig("custom_events", []).forEach((cev: any) => {
+      this.eventTypes[cev.name] = cev;
+    });
+    this.logLevel = +(this.configs.log_level.value || 1);
+    db.set_sql_logging?.(!!this.configs?.log_sql?.value);
+    if (!noSignal) this.log(5, "Refresh config");
+    if (db.is_node) {
+      await this.refresh_i18n();
+      await this.refresh_push_helper();
+    }
+    if (!noSignal && db.is_node)
+      this.processSend({ refresh: "config", tenant: db.getTenantSchema() });
+  }
+
+  async ensure_has_roles() {
+    if (this.roles.length == 0) await this.refresh_roles(true);
+  }
+
+  async refresh_roles(noSignal?: boolean) {
+    const Role = (await import("../models/role.js")).default;
+    this.roles = await Role.find({}, { orderBy: "id" });
+
+    if (!noSignal) this.log(5, "Refresh roles");
+    if (!noSignal && db.is_node)
+      this.processSend({ refresh: "roles", tenant: db.getTenantSchema() });
+  }
+
+  /**
+   * Set a config value that will not persist into the db
+   * @param key config key
+   * @param value config val
+   */
+  refresh_ephemeral_config(key: string, value: any) {
+    this.configs[key] = { value };
+    this.hasJoinedLogSockets =
+      (this.configs.joined_log_socket_ids?.value || []).length > 0;
+    this.hasJoinedDynamicUpdateSockets =
+      (this.configs.joined_dynamic_update_socket_ids?.value || []).length > 0;
+    this.hasJoinedCollabSockets =
+      (this.configs.joined_real_time_socket_ids?.value || []).length > 0;
+  }
+
+  //legacy
+  async refreshUserLayouts() {
+    await this.refresh_userlayouts(false);
+  }
+  async refresh_userlayouts(noSignal?: boolean) {
+    this.userLayouts = {};
+    const usersWithLayout = (await User.find({})).filter(
+      (user) => user._attributes?.layout
+    );
+    for (const user of usersWithLayout) {
+      let pluginName = user._attributes.layout.plugin;
+      let module = this.plugins[pluginName];
+      if (!module) {
+        pluginName = this.plugin_module_names[pluginName];
+        module = this.plugins[pluginName];
+      }
+      const pluginCfg = this.plugin_cfgs[pluginName];
+      if (module?.layout) {
+        // @ts-ignore
+        const userLayout = module.layout({
+          ...pluginCfg,
+          ...user._attributes.layout.config,
+        });
+        this.userLayouts[user.email] = {
+          ...userLayout,
+          pluginName,
+          config: { ...pluginCfg, ...user._attributes.layout.config },
+        };
+      }
+    }
+    if (!noSignal && db.is_node)
+      this.processSend({
+        refresh: "userlayouts",
+        tenant: db.getTenantSchema(),
+      });
+  }
+
+  /**
+   * Refresh i18n Internationalization
+   * @returns {Promise<void>}
+   */
+  async refresh_i18n() {
+    const staticCatalog: Record<string, Record<string, string>> = {};
+
+    const allStrings = this.getConfig("localizer_strings", {});
+    for (const lang of Object.keys(this.getConfig("localizer_languages", {}))) {
+      staticCatalog[lang] = allStrings[lang] || {};
+    }
+    this.log(5, "Refresh i18n");
+
+    this.i18n = new I18n.I18n();
+    this.i18n.configure({
+      locales: Object.keys(this.getConfig("localizer_languages", {})),
+      staticCatalog,
+      mustacheConfig: { disable: true },
+      defaultLocale: this.getConfig("default_locale"),
+    });
+  }
+
+  async refresh_push_helper() {
+    try {
+      if (!this.pushHelper)
+        this.pushHelper = await PushMessageHelper.createInstance();
+      else await this.pushHelper.refreshInstance();
+    } catch (error) {
+      console.error("Error initializing push helper", error);
+    }
+  }
+
+  /**
+   * Refresh views
+   * @param {boolean} noSignal - Do not signal refresh to other cluster processes.
+   * @returns {Promise<void>}
+   */
+  async refresh_views(noSignal?: boolean) {
+    this.views = await View.find();
+    this.virtual_triggers = [];
+    for (const view of this.views) {
+      if (view.viewtemplateObj && view.viewtemplateObj.virtual_triggers) {
+        const trs = await view.viewtemplateObj.virtual_triggers(
+          view.table_id,
+          view.name,
+
+          view.configuration
+        );
+        this.virtual_triggers.push(...trs);
+      }
+    }
+    // rebuild assets_by_role whenever views change
+    try {
+      await this.computeAssetsByRole();
+    } catch (error) {
+      console.error("Error computing assets by role", error);
+    }
+    if (!noSignal) this.log(5, "Refresh views");
+
+    if (!noSignal && db.is_node)
+      this.processSend({ refresh: "views", tenant: db.getTenantSchema() });
+  }
+
+  /**
+   * Refresh triggers
+   * @param {boolean} noSignal - Do not signal refresh to other cluster processes.
+   * @returns {Promise<void>}
+   */
+  async refresh_triggers(noSignal?: boolean) {
+    this.triggers = await Trigger.findDB();
+    if (!noSignal) this.log(5, "Refresh triggers");
+
+    if (!noSignal && db.is_node)
+      this.processSend({ refresh: "triggers", tenant: db.getTenantSchema() });
+  }
+
+  /**
+   * Refresh pages
+   * @param {boolean} noSignal - Do not signal refresh to other cluster processes.
+   * @returns {Promise<void>}
+   */
+  async refresh_pages(noSignal?: boolean) {
+    const Page = (await import("../models/page.js")).default;
+    this.pages = await Page.find();
+    if (!noSignal) this.log(5, "Refresh pages");
+
+    if (!noSignal && db.is_node)
+      this.processSend({ refresh: "pages", tenant: db.getTenantSchema() });
+  }
+
+  async refresh_page_groups(noSignal?: boolean) {
+    await db.tryCatchInTransaction(
+      async () => {
+        //sometimes this is run before migration
+        const PageGroup = (await import("../models/page_group.js")).default;
+        this.page_groups = await PageGroup.find();
+        if (!noSignal) this.log(5, "Refresh page groups");
+      },
+      (e: Error) => {
+        console.error("error initializing page groups", e);
+      }
+    );
+    if (!noSignal && db.is_node)
+      this.processSend({
+        refresh: "page_groups",
+        tenant: db.getTenantSchema(),
+      });
+  }
+
+  /**
+   * Refresh tables list and table definitions (including fields) in State
+   * @param {boolean} noSignal - Do not signal refresh to other cluster processes.
+   * @returns {Promise<void>}
+   */
+  async refresh_tables(noSignal?: boolean) {
+    const allTables = await db.select(
+      "_sc_tables",
+      {},
+      { orderBy: "name", nocase: true }
+    );
+    this.fields = await db.select(
+      "_sc_fields",
+      {},
+      { orderBy: "name", nocase: true }
+    );
+    const allConstraints = await db.select("_sc_table_constraints", {});
+    let allModels: Model[] = [];
+    await db.tryCatchInTransaction(
+      async () => {
+        //needed for refresh in pre-model migration
+        allModels = await Model.find({});
+      },
+      (e: Error) => {}
+    );
+    for (const table of allTables) {
+      if (table.provider_name) {
+        table.provider_cfg = stringToJSON(table.provider_cfg);
+        const provider = this.table_providers[table.provider_name];
+        if (!provider) table.fields = [];
+        else {
+          if (typeof provider.fields === "function")
+            table.fields = await provider.fields(table.provider_cfg);
+          else table.fields = provider.fields;
+          table.fields.forEach((f: any) => (f.table_id = table.id));
+          this.fields.push(...table.fields);
+        }
+        continue;
+      }
+      table.fields = this.fields.filter((f: Field) => f.table_id === table.id);
+      table.constraints = allConstraints
+        .filter((f: any) => f.table_id === table.id)
+        .map((c: any) => new TableConstraint(c));
+      table.fields.forEach((f: GenObj) => {
+        if (db.json_read_returns_string && typeof f.attributes === "string")
+          f.attributes = JSON.parse(f.attributes);
+        if (
+          f.attributes &&
+          f.attributes.localizes_field &&
+          f.attributes.locale
+        ) {
+          const localized = table.fields.find(
+            (lf: Field) => lf.name === f.attributes.localizes_field
+          );
+          if (localized) {
+            if (
+              db.json_read_returns_string &&
+              typeof localized.attributes === "string"
+            )
+              localized.attributes = JSON.parse(localized.attributes);
+            if (!localized.attributes) localized.attributes = {};
+
+            if (!localized.attributes.localized_by)
+              localized.attributes.localized_by = {};
+
+            localized.attributes.localized_by[f.attributes.locale] = f.name;
+          }
+        }
+        if (f.type === "Key") {
+          const reftable = allTables.find(
+            (t: GenObj) => t.name === f.reftable_name
+          );
+          if (reftable) {
+            const refPK = (reftable.fields || []).find(
+              (f: GenObj) => f.primary_key
+            );
+            if (refPK) f.reftype = refPK.type?.name || refPK.type;
+          }
+        }
+      });
+      const models = allModels.filter((m: any) => m.table_id == table.id);
+      for (const model of models) {
+        const predictor_function = model.predictor_function;
+        this.functions[model.name] = {
+          isAsync: true,
+          run: predictor_function,
+          arguments: [
+            { name: "arg1", type: "JSON", tstype: "string | Row" },
+            { name: "arg2", type: "JSON", tstype: "Row" },
+          ],
+        };
+        this.function_context[model.name] = predictor_function;
+      }
+    }
+    this.tables = allTables;
+
+    if (!noSignal) this.log(5, "Refresh table");
+
+    if (!noSignal && db.is_node)
+      this.processSend({ refresh: "tables", tenant: db.getTenantSchema() });
+  }
+
+  /**
+   * Get config parameter by key
+   * @param {string} key - key of config paramter
+   * @param {*} [def] - default value
+   * @returns {*}
+   */
+  getConfig(key: string, def?: any) {
+    const fixed = db.connectObj.fixed_configuration[key];
+    if (typeof fixed !== "undefined") return fixed;
+    const exposed = db.connectObj.exposed_configuration[key];
+    if (typeof exposed !== "undefined") return exposed;
+    if (db.connectObj.inherit_configuration.includes(key)) {
+      if (typeof singleton.configs[key] !== "undefined")
+        return singleton.configs[key].value;
+      else return def || configTypes[key].default;
+    }
+    if (this.configs[key] && typeof this.configs[key].value !== "undefined")
+      return this.configs[key].value;
+    if (def) return def;
+    else return configTypes[key] && configTypes[key].default;
+  }
+
+  get utcOffset() {
+    const tzName = this.getConfig("timezone");
+    if (!tzName) return 0;
+    return tz(tzName).utcOffset() / 60;
+  }
+
+  /**
+   * Get copy of config parameter (which can be safely mutated)
+   * @param {string} key - key of parameter
+   * @param {*} [def] - default value
+   * @returns {*}
+   */
+  getConfigCopy(key: string, def?: any) {
+    return structuredClone(this.getConfig(key, def));
+  }
+
+  /**
+   * Set value of config parameter
+   * @param key - key of parameter
+   * @param value - value of parameter
+   */
+  async setConfig(key: string, value: any) {
+    if (
+      !this.configs[key] ||
+      typeof this.configs[key].value === "undefined" ||
+      this.configs[key].value !== value
+    ) {
+      const fn = async () => {
+        const isEphemeral = !!configTypes[key]?.ephemeral;
+        if (!isEphemeral) await setConfig(key, value);
+        this.configs[key] = { value };
+        if (key.startsWith("localizer_")) await this.refresh_i18n();
+        if (key === "log_level") this.logLevel = +value;
+        if (key === "joined_log_socket_ids")
+          this.hasJoinedLogSockets = (value || []).length > 0;
+        if (key === "joined_dynamic_update_socket_ids")
+          this.hasJoinedDynamicUpdateSockets = (value || []).length > 0;
+        if (key === "joined_real_time_socket_ids")
+          this.hasJoinedCollabSockets = (value || []).length > 0;
+        if (db.is_node) {
+          if (isEphemeral) {
+            // config does not persist, send the whole object
+            this.processSend({
+              refresh: "ephemeral_config",
+              tenant: db.getTenantSchema(),
+              key,
+              value,
+            });
+          } else {
+            // config does persist, just send the key
+            this.processSend({
+              refresh: "config",
+              tenant: db.getTenantSchema(),
+            });
+          }
+        } else {
+          // mobile
+          if (isEphemeral) this.refresh_ephemeral_config(key, value);
+          else await this.refresh_config(true);
+        }
+      };
+      if (db.getTenantSchema() !== this.tenant)
+        await db.runWithTenant(this.tenant, fn);
+      else await fn();
+    }
+  }
+
+  /**
+   * Delete config parameter by key
+   * @param keys - key of parameter
+   */
+  async deleteConfig(...keys: string[]) {
+    const fn = async () => {
+      for (const key of keys) {
+        await deleteConfig(key);
+        delete this.configs[key];
+      }
+      if (db.is_node)
+        this.processSend({ refresh: "config", tenant: db.getTenantSchema() });
+      else {
+        await this.refresh_config(true);
+      }
+    };
+    if (db.getTenantSchema() !== this.tenant)
+      await db.runWithTenant(this.tenant, fn);
+    else await fn();
+  }
+
+  /**
+   * Find the registered importer for a file name by its extension
+   * @param filename
+   * @returns the importer name and importer, or undefined
+   */
+  importerForFile(
+    filename: string
+  ): { name: string; importer: FileImporter } | undefined {
+    const ext = extname(filename || "").toLowerCase();
+    if (!ext) return undefined;
+    for (const [name, importer] of Object.entries(this.importers))
+      if (importer.extensions.some((e) => e.toLowerCase() === ext))
+        return { name, importer };
+    return undefined;
+  }
+
+  /**
+   * Register plugin
+   * @param {string} name
+   * @param {object} plugin
+   * @param {*} cfg
+   * @param {*} location
+   * @param {string} modname
+   * @returns {void}
+   */
+  registerPlugin(
+    name: string,
+    plugin: Plugin,
+    setCfg?: SingleConfig,
+    location?: string,
+    modname?: string
+  ) {
+    this.log(6, `Register Plugin: ${name} at ${location}`);
+    this.plugins[name] = plugin;
+    const cfg = {
+      ...setCfg,
+      ...(db.connectObj.fixed_plugin_configuration?.[name] || {}),
+    };
+    this.plugin_cfgs[name] = cfg;
+    if (plugin.exposed_configs && cfg) {
+      const exposedCfgs: any = {};
+      for (const exposed of plugin.exposed_configs) {
+        exposedCfgs[exposed] = cfg[exposed];
+      }
+      this.plugins_cfg_context[name] = exposedCfgs;
+    }
+    if (location) this.plugin_locations[plugin.plugin_name || name] = location;
+    this.headers[name] = [];
+    if (modname) this.plugin_module_names[modname] = name;
+
+    let hasFunctions = false;
+    const withCfg = (key: string, def?: any) =>
+      plugin.configuration_workflow
+        ? plugin[key]
+          ? plugin[key](cfg || {})
+          : def
+        : plugin[key] || def;
+
+    withCfg("types", []).forEach((t: Type) => {
+      this.addType(t);
+    });
+    withCfg("viewtemplates", []).forEach((vt: ViewTemplate) => {
+      this.viewtemplates[vt.name] = vt;
+    });
+    Object.entries(withCfg("functions", {})).forEach(
+      ([k, v]: [k: string, v: any]) => {
+        hasFunctions = true;
+        this.functions[k] = v;
+        this.function_context[k] = typeof v === "function" ? v : v.run;
+      }
+    );
+    Object.entries(withCfg("modelpatterns", {})).forEach(
+      ([k, v]: [k: string, v: any]) => {
+        this.modelpatterns[k] = v;
+      }
+    );
+    Object.entries(withCfg("fileviews", {})).forEach(([k, v]) => {
+      this.fileviews[k] = v as FieldView;
+    });
+    Object.entries(withCfg("actions", {})).forEach(([k, v]) => {
+      this.actions[k] = v as Action;
+    });
+    Object.entries(withCfg("eventTypes", {})).forEach(([k, v]) => {
+      this.eventTypes[k] = v as { hasChannel: boolean };
+    });
+    Object.entries(withCfg("fonts", {})).forEach(([k, v]) => {
+      this.fonts[k] = v as string;
+    });
+    withCfg("icons", []).forEach((icon: string) => {
+      this.iconSet.add(icon);
+    });
+    Object.entries(withCfg("table_providers", {})).forEach(([k, v]) => {
+      this.table_providers[k] = v as TableProvider;
+    });
+    Object.entries(withCfg("importers", {})).forEach(([k, v]) => {
+      this.importers[k] = v as FileImporter;
+    });
+    Object.entries(withCfg("exporters", {})).forEach(([k, v]) => {
+      this.exporters[k] = v as FileExporter;
+    });
+    Object.entries(withCfg("authentication", {})).forEach(([k, v]) => {
+      this.auth_methods[k] = v as AuthenticationMethod;
+    });
+    Object.entries(withCfg("exchange", {})).forEach(([k, v]) => {
+      if (!this.exchange[k]) this.exchange[k] = [];
+      this.exchange[k].push(...(v as Array<unknown>));
+    });
+    // keyed by name, so re-registering replaces this plugin's hook instead of duplicating it
+    const authorizeViewHook = withCfg("authorize_view");
+    if (authorizeViewHook) this.authorize_view_hooks[name] = authorizeViewHook;
+    else delete this.authorize_view_hooks[name];
+    const authorizePageHook = withCfg("authorize_page");
+    if (authorizePageHook) this.authorize_page_hooks[name] = authorizePageHook;
+    else delete this.authorize_page_hooks[name];
+    const authorizeTriggerHook = withCfg("authorize_trigger");
+    if (authorizeTriggerHook)
+      this.authorize_trigger_hooks[name] = authorizeTriggerHook;
+    else delete this.authorize_trigger_hooks[name];
+    const authorizeApiHook = withCfg("authorize_api");
+    if (authorizeApiHook) this.authorize_api_hooks[name] = authorizeApiHook;
+    else delete this.authorize_api_hooks[name];
+    withCfg("copilot_skills", []).forEach((v: CopilotSkill) => {
+      if (
+        v?.function_name &&
+        !this.copilot_skills
+          .map((s) => s.function_name)
+          .includes(v?.function_name)
+      )
+        this.copilot_skills.push(v);
+    });
+
+    Object.entries(withCfg("external_tables", {})).forEach(
+      ([k, v]: [k: string, v: any]) => {
+        if (!v.name) v.name = k;
+        this.external_tables[k] = v;
+      }
+    );
+    Object.entries(withCfg("fieldviews", {})).forEach(
+      ([nm, fv]: [nm: string, fv: any]) => {
+        const process_fv = (k: string, v: FieldView) => {
+          if (!v.type) return;
+          if (Array.isArray(v.type)) {
+            v.type.forEach((t) => {
+              process_fv(k, { ...v, type: t });
+            });
+            return;
+          }
+
+          if (v.type === "Key") {
+            this.keyFieldviews[k] = v;
+            return;
+          }
+          const type = this.types[v.type];
+          if (type) {
+            if (type.fieldviews) type.fieldviews[k] = v;
+            else type.fieldviews = { [k]: v };
+          } else {
+            if (!this.stashed_fieldviews[v.type])
+              this.stashed_fieldviews[v.type] = {};
+            this.stashed_fieldviews[v.type][k] = v;
+          }
+        };
+        process_fv(nm, fv);
+      }
+    );
+    const layout = withCfg("layout");
+    if (layout) {
+      // TOOO ch
+      this.layouts[name] = layout;
+    }
+    const verifier = withCfg("verifier_workflow");
+    if (verifier) {
+      this.verifier = verifier;
+    }
+
+    const existingScripts = new Set(
+      Object.values(this.headers)
+        .flat(1)
+        .map((h) => h.script)
+        .filter(Boolean)
+    );
+    withCfg("headers", []).forEach((h: any) => {
+      if (
+        !this.headers[name].includes(h) &&
+        !(h.script && existingScripts.has(h.script))
+      )
+        this.headers[name].push(h);
+    });
+    const routes = withCfg("routes", []);
+    this.plugin_routes[name] = routes;
+    if (routes.length > 0 && this.routesChangedCb) this.routesChangedCb();
+
+    withCfg("capacitor_plugins", []).forEach((capPlugin: CapacitorPlugin) => {
+      if (this.capacitorPlugins.find((cp) => cp.name === capPlugin.name))
+        this.log(5, `Capacitor plugin ${capPlugin.name} already registered`);
+      else this.capacitorPlugins.push(capPlugin);
+    });
+
+    // a plugin can add to function_context, which the evaluator holds
+    this.invalidate_evaluator();
+
+    if (hasFunctions)
+      this.refresh_codepages(true).catch((e) => console.error(e));
+  }
+
+  /**
+   * @param kind - which authorize_* hook store to look up
+   * @returns that kind's registered hooks, keyed by plugin name
+   */
+  private hooksFor(kind: AuthorizeAccessKind): Record<string, AnyAuthorizeAccessHook> {
+    switch (kind) {
+      case "view":
+        return this.authorize_view_hooks;
+      case "page":
+        return this.authorize_page_hooks;
+      case "trigger":
+        return this.authorize_trigger_hooks;
+      case "api":
+        return this.authorize_api_hooks;
+      default:
+        return {}; // reachable from JS plugin code with an untyped kind
+    }
+  }
+
+  /**
+   * Lets callers skip straight to their min_role fallback (no request
+   * object, no dispatch) when no plugin has an opinion on this kind at all.
+   * @param kind - which authorize_* hook store to check
+   */
+  hasAuthorizeHooks(kind: AuthorizeAccessKind): boolean {
+    return Object.keys(this.hooksFor(kind)).length > 0;
+  }
+
+  /**
+   * Runs every authorize_* hook for this kind; the highest-priority result
+   * wins (ties favor allow). Null means every hook abstained - callers then
+   * fall back to their own min_role check.
+   * @param kind - which authorize_* hook array to run
+   * @param request - action (get/post), the target entity, state/body, req
+   * @param user
+   * @returns {Promise<AuthorizeAccessResult | null>}
+   */
+  private async dispatchAuthorize(
+    kind: AuthorizeAccessKind,
+    request: AuthorizeAccessRequestBase,
+    user: any
+  ): Promise<AuthorizeAccessResult | null> {
+    const hookFns = Object.values(this.hooksFor(kind));
+    if (hookFns.length === 0) return null;
+    const results = await Promise.all(hookFns.map((hook) => hook(request, user)));
+    let best: AuthorizeAccessResult | null = null;
+    let bestPriority = -Infinity;
+    for (const res of results) {
+      if (!res?.decision) continue; // abstain
+      // a NaN/non-finite priority would poison every later comparison forever
+      const priority = Number.isFinite(res.priority) ? res.priority! : 0;
+      if (
+        !best ||
+        priority > bestPriority ||
+        (priority === bestPriority &&
+          res.decision === "allow" &&
+          best.decision === "deny")
+      ) {
+        best = res;
+        bestPriority = priority;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Checks plugin `authorize_view` hooks. Returns null if every hook
+   * abstained (or there are none) - see dispatchAuthorize.
+   * @param request
+   * @param user
+   * @returns {Promise<AuthorizeAccessResult | null>}
+   */
+  async authorizeView(
+    request: AuthorizeAccessViewRequest,
+    user: any
+  ): Promise<AuthorizeAccessResult | null> {
+    return this.dispatchAuthorize("view", request, user);
+  }
+
+  /**
+   * Checks plugin `authorize_page` hooks. Returns null if every hook
+   * abstained (or there are none) - see dispatchAuthorize.
+   * @param request
+   * @param user
+   * @returns {Promise<AuthorizeAccessResult | null>}
+   */
+  async authorizePage(
+    request: AuthorizeAccessPageRequest,
+    user: any
+  ): Promise<AuthorizeAccessResult | null> {
+    return this.dispatchAuthorize("page", request, user);
+  }
+
+  /**
+   * Checks plugin `authorize_trigger` hooks. Returns null if every hook
+   * abstained (or there are none) - see dispatchAuthorize.
+   * @param request
+   * @param user
+   * @returns {Promise<AuthorizeAccessResult | null>}
+   */
+  async authorizeTrigger(
+    request: AuthorizeAccessTriggerRequest,
+    user: any
+  ): Promise<AuthorizeAccessResult | null> {
+    return this.dispatchAuthorize("trigger", request, user);
+  }
+
+  /**
+   * Access decision for a plugin API route (no view/page/trigger to hang
+   * authorize() off of). A hook's allow/deny always wins; role <= min_role
+   * only decides if every hook abstains.
+   * @param user - the acting user (or undefined/public)
+   * @param opts.route - identifier of the target route/action
+   * @param opts.action - "get" or "post"
+   * @param opts.req - the request object, forwarded to hooks
+   * @param opts.state - query/state, for action "get"
+   * @param opts.body - POST body, for action "post"
+   * @param role - the acting user's role_id
+   * @param min_role - the route's own minimum role
+   * @returns {Promise<boolean>}
+   */
+  async authorizeApi(
+    user: any,
+    opts: {
+      route: string;
+      action: "get" | "post";
+      req: any;
+      state?: GenObj;
+      body?: GenObj;
+    },
+    role: number,
+    min_role: number
+  ): Promise<boolean> {
+    const result = await this.dispatchAuthorize(
+      "api",
+      {
+        action: opts.action,
+        route: opts.route,
+        state: opts.state,
+        body: opts.body,
+        req: opts.req,
+      },
+      user
+    );
+    if (result?.decision === "deny") return false;
+    if (result?.decision === "allow") return true;
+    return role <= min_role;
+  }
+
+  /**
+   * Get type names
+   * @type {string[]}
+   */
+  get type_names() {
+    return Object.keys(this.types);
+  }
+
+  /**
+   * Add type
+   * @param {object} t
+   */
+  addType(t: Type) {
+    if (this.types[t.name]) return;
+
+    this.types[t.name] = {
+      ...t,
+      fieldviews: {
+        ...t.fieldviews,
+        ...(this.stashed_fieldviews[t.name] || {}),
+      },
+    };
+  }
+
+  /**
+   * Remove plugin
+   * @param {string} name
+   * @param {boolean} noSignal - Do not signal removal to other cluster processes.
+   * @returns {Promise<void>}
+   */
+  async remove_plugin(name: string, noSignal?: boolean) {
+    delete this.plugins[name];
+    await this.refresh_plugins();
+    if (!noSignal && db.is_node)
+      this.processSend({ removePlugin: name, tenant: db.getTenantSchema() });
+  }
+
+  get eval_context() {
+    return {
+      process: undefined,
+      ...this.function_context,
+      ...this.codepage_context,
+    };
+  }
+
+  /**
+   * Evaluates expressions and `{{ }}` interpolations, holding the eval_context
+   * and a cache of compiled expressions. Built on first use and discarded by
+   * invalidate_evaluator() whenever the eval_context changes.
+   */
+  get evaluator(): Evaluator {
+    if (!this._evaluator) this._evaluator = new Evaluator(this.eval_context);
+    return this._evaluator;
+  }
+
+  /**
+   * Drop the evaluator so the next use rebuilds it against the current
+   * eval_context. Invalidating rather than rebuilding here keeps a burst of
+   * registerPlugin() calls at startup to a single rebuild.
+   */
+  invalidate_evaluator() {
+    this._evaluator = undefined;
+  }
+
+  /**
+   * Take the config 'function_code_pages' and build the 'codepage_context' member
+   * @param noSignal - Do not signal reload to other cluster processes.
+   * @param keepUnchanged - When 'function_code_pages' didn't change, true skips building it again
+   */
+  async refresh_codepages(noSignal?: boolean, keepUnchanged?: boolean) {
+    const code_pages: Record<string, string> = this.getConfig(
+      "function_code_pages",
+      {}
+    );
+    if (keepUnchanged && flatEqual(code_pages, this.oldCodePages)) return;
+    let errMsg;
+    if (Object.keys(code_pages).length > 0) {
+      const Page = (await import("../models/page.js")).default;
+      const asyncFs: Function[] = [];
+      const runAsync = (f: Function) => {
+        asyncFs.push(f);
+      };
+      try {
+        const myContext = {
+          ...this.function_context,
+          Table,
+          File: File.subClassIfTenant(),
+          View,
+          User,
+          Page,
+          Field,
+          Trigger,
+          MetaData,
+          setTimeout,
+          fetch,
+          sleep,
+          interpolate,
+          runAsync,
+          tryCatchInTransaction: db.tryCatchInTransaction,
+          commitAndBeginNewTransaction: db.commitAndBeginNewTransaction,
+          emit_to_client: (data: any, userIds?: number[] | null) => {
+            const enabled = this.getConfig("enable_dynamic_updates", true);
+            if (!enabled) {
+              this.log(
+                5,
+                "emit_to_client called, but dynamic updates are disabled"
+              );
+              return;
+            }
+            const safeIds: number[] | null | undefined = Array.isArray(userIds)
+              ? userIds
+              : userIds === null
+                ? null
+                : userIds
+                  ? [userIds as any]
+                  : [];
+            this.emitDynamicUpdate(db.getTenantSchema(), data, safeIds);
+          },
+          Buffer: isNode() ? Buffer : bufferPkg,
+          URL,
+          console, //TODO consoleInterceptor
+          require: (nm: string) => this.codeNPMmodules[nm],
+          setConfig: (k: string, v: any) =>
+            this.isFixedConfig(k) ? undefined : this.setConfig(k, v),
+          getConfig: (k: string) =>
+            this.isFixedConfig(k) ? undefined : this.getConfig(k),
+        };
+        const funCtxKeys = new Set(Object.keys(myContext));
+        let stripTypes = (s: string) => s;
+        try {
+          const { stripTypeScriptTypes } = modulePkg as any;
+          if (stripTypeScriptTypes) stripTypes = stripTypeScriptTypes;
+        } catch (e) {
+          //ignore
+        }
+        const codeStr = stripTypes(Object.values(code_pages).join(";\n"));
+
+        let sandboxCtx: any;
+        if (isNode()) {
+          const vm = new VM({
+            sandbox: myContext,
+            // eval is enabled in the root tenant only
+            eval: this.tenant === db.connectObj.default_schema,
+            wasm: false,
+          });
+          vm.run(codeStr);
+          sandboxCtx = vm.sandbox;
+        } else {
+          // vm2 is not available on mobile (Capacitor)
+          sandboxCtx = oldVm.createContext(myContext);
+          oldVm.runInContext(codeStr, sandboxCtx);
+        }
+        for (const f of asyncFs) {
+          await f();
+        }
+        this.codepage_context = {};
+        Object.keys(sandboxCtx).forEach((k) => {
+          // vm2 exposes its own intrinsics (eval, Function, global) on the
+          // sandbox. Do not copy these into codepage_context: they are bound to
+          // the code-page VM and would shadow the intrinsics of any expression
+          // VM that uses the eval context as its sandbox (e.g. disabling eval).
+          if (!funCtxKeys.has(k) && !vmSandboxIntrinsics.has(k)) {
+            this.codepage_context[k] = sandboxCtx[k];
+          }
+        });
+      } catch (e: any) {
+        console.error("code page load error: ", e);
+        errMsg = e?.message || e;
+      }
+    }
+    this.invalidate_evaluator(); // codepage_context has been rebuilt
+    if (!noSignal && db.is_node)
+      this.processSend({ refresh: "codepages", tenant: db.getTenantSchema() });
+    this.oldCodePages = code_pages;
+    return errMsg;
+  }
+
+  /**
+   * Reload plugins
+   * @param {boolean} noSignal - Do not signal reload to other cluster processes.
+   * @returns {Promise<void>}
+   */
+  async refresh_plugins(noSignal?: boolean) {
+    this.viewtemplates = {};
+    this.modelpatterns = {};
+    this.types = {};
+    this.stashed_fieldviews = {};
+    this.fields = [];
+    this.fileviews = {};
+    this.actions = {};
+    this.auth_methods = {};
+    this.importers = {};
+    this.exporters = {};
+    this.copilot_skills = [];
+    this.layouts = { emergency: emergency_layout as any };
+    this.headers = {};
+    this.function_context = { moment: myMoment, today, slugify: db.slugify };
+    this.functions = { moment: myMoment, today, slugify: db.slugify };
+    this.keyFieldviews = {};
+    this.external_tables = {};
+    this.eventTypes = {};
+    this.exchange = {};
+    this.authorize_view_hooks = {};
+    this.authorize_page_hooks = {};
+    this.authorize_trigger_hooks = {};
+    this.authorize_api_hooks = {};
+    this.verifier = null;
+    this.fonts = standard_fonts;
+    this.iconSet = new Set(get_standard_icons());
+
+    Object.entries(this.plugins).forEach(([k, v]: [k: string, v: Plugin]) => {
+      this.registerPlugin(k, v, this.plugin_cfgs[k]);
+    });
+    await this.refresh(true);
+    if (!noSignal && db.is_node)
+      this.processSend({ refresh: "plugins", tenant: db.getTenantSchema() });
+  }
+
+  /**
+   * Collect translatable strings from configuration
+   * @returns {string[]}
+   */
+  getStringsForI18n() {
+    const strings = [];
+    this.views.forEach((v) => strings.push(...v.getStringsForI18n()));
+    this.pages.forEach((p) => strings.push(...p.getStringsForI18n()));
+    const menu = this.getConfig("menu_items", []);
+    strings.push(...menu.map(({ label }: { label: string }) => label));
+    strings.push(this.getConfig("site_name"));
+    for (const table of this.tables)
+      for (const field of table.fields) {
+        strings.push(field.label);
+        if (
+          ((typeof field.type !== "string" && field.type?.name === "String") ||
+            field.type === "String") &&
+          field.attributes?.options
+        )
+          strings.push(
+            ...field.attributes.options.split(",").map((s: string) => s.trim())
+          );
+      }
+
+    return Array.from(new Set(strings)).filter(
+      (s) => s && removeAllWhiteSpace(s)
+    );
+  }
+
+  /**
+   * Set the function which will be called when a message enters a room
+   * @param {function} f
+   */
+  setRoomEmitter(f: Function) {
+    globalRoomEmitter = f;
+  }
+
+  /**
+   * Send a message to a room
+   * @param {...*} args
+   */
+  emitRoom(...args: any[]) {
+    let noMultiNodePropagate = false;
+    const last = args.length > 0 ? args[args.length - 1] : null;
+    if (last && typeof last === "object" && "noMultiNodePropagate" in last) {
+      const opts = args.pop() as { noMultiNodePropagate?: boolean };
+      noMultiNodePropagate = !!opts.noMultiNodePropagate;
+    }
+
+    globalRoomEmitter(...args);
+    if (!noMultiNodePropagate && db.connectObj.multi_node) {
+      this.processSend({
+        real_time_chat_event: {
+          ...args,
+        },
+      });
+    }
+  }
+
+  setLogEmitter(f: Function) {
+    globalLogEmitter = f;
+  }
+
+  /**
+   * Send a backup-restore progress update to whoever is watching a
+   * restore job. Not persisted anywhere - if no client is currently
+   * connected to the job's room, the message is simply dropped.
+   * @param ten
+   * @param jobId
+   * @param data
+   * @param noMultiNodePropagate - if true, do not propagate to other nodes in multi-node setup
+   */
+  emitRestoreProgress(
+    ten: string,
+    jobId: string,
+    data: any,
+    noMultiNodePropagate?: boolean
+  ) {
+    globalRestoreEmitter(ten, jobId, data);
+    if (!noMultiNodePropagate && db.connectObj.multi_node) {
+      this.processSend({
+        restore_progress_event: { jobId, data },
+        tenant: ten,
+      });
+    }
+  }
+
+  /**
+   * @param f Function to emit collaborative editing messages
+   */
+  setCollabEmitter(f: Function) {
+    globalCollabEmitter = f;
+  }
+
+  /**
+   * @param f Function to emit dynamic update messages triggered from run_js_code actions
+   */
+  setDynamicUpdateEmitter(f: Function) {
+    globalDynamicUpdateEmitter = f;
+  }
+
+  /**
+   * @param f Function to emit backup-restore progress messages
+   */
+  setRestoreEmitter(f: Function) {
+    globalRestoreEmitter = f;
+  }
+
+  /**
+   * emit a log message for the log viewer
+   * @param ten
+   * @param min_level
+   * @param msg
+   * @param noMultiNodePropagate - if true, do not propagate to other nodes in multi-node setup
+   */
+  emitLog(
+    ten: string,
+    min_level: number,
+    msg: string,
+    noMultiNodePropagate?: boolean
+  ) {
+    if (this.hasJoinedLogSockets) globalLogEmitter(ten, min_level, msg);
+    if (!noMultiNodePropagate && db.connectObj.multi_node) {
+      this.processSend({
+        log_event: {
+          min_level,
+          msg,
+        },
+        tenant: ten,
+      });
+    }
+  }
+
+  /**
+   * For collaborative editing
+   * @param ten
+   * @param type
+   * @param data
+   * @param viewname - the source view name, used to scope the collab room
+   * @param noMultiNodePropagate - if true, do not propagate to other nodes in multi-node setup
+   */
+  emitCollabMessage(
+    ten: string,
+    type: string,
+    data: any,
+    viewname: string,
+    noMultiNodePropagate?: boolean
+  ) {
+    if (this.hasJoinedCollabSockets)
+      globalCollabEmitter(ten, type, data, viewname);
+    else this.log(5, "emitCollabMessage called, but no clients are joined yet");
+    if (!noMultiNodePropagate && db.connectObj.multi_node) {
+      this.processSend({
+        real_time_collab_event: {
+          data,
+          type,
+          viewname,
+        },
+        tenant: ten,
+      });
+    }
+  }
+
+  /**
+   * For dynamic updates triggered from a run_js_code action
+   * @param ten
+   * @param data
+   * @param userIds - array of user IDs to target specific users, null to broadcast to public (unauthenticated) users only, undefined to broadcast to authenticated users only
+   * @param noMultiNodePropagate - if true, do not propagate to other nodes in multi-node setup
+   */
+  emitDynamicUpdate(
+    ten: string,
+    data: any,
+    userIds?: number[] | null,
+    noMultiNodePropagate?: boolean
+  ) {
+    if (this.hasJoinedDynamicUpdateSockets)
+      globalDynamicUpdateEmitter(ten, data, userIds);
+    else this.log(5, "emitDynamicUpdate called, but no clients are joined yet");
+    if (!noMultiNodePropagate && db.connectObj.multi_node) {
+      this.processSend({
+        dynamic_update: data,
+        tenant: ten,
+        userIds: userIds,
+      });
+    }
+  }
+
+  /**
+   * Registers a callback so a message sent to this id (from any node)
+   * reaches this operation. Call the returned function when done.
+   * @param id - unique id for this operation
+   * @param onMessage - called when a message for this id arrives
+   * @returns unregister function
+   */
+  registerNodeHandle(id: string, onMessage: (payload?: any) => void): () => void {
+    this.nodeHandles.set(id, onMessage);
+    return () => {
+      // only remove it if it's still ours - a newer registration under the
+      // same id may have already replaced it
+      if (this.nodeHandles.get(id) === onMessage) this.nodeHandles.delete(id);
+    };
+  }
+
+  /**
+   * Broadcast a message to whichever node/worker has a handler registered
+   * for id (see registerNodeHandle). A no-op wherever nothing is registered.
+   */
+  sendToNodeHandle(id: string, payload?: any) {
+    this.processSend({
+      node_handle_msg: { id, payload },
+      tenant: db.getTenantSchema(),
+    });
+  }
+
+  /**
+   * Deliver a node-handle message on this node/worker. Called from the
+   * cross-node/cross-worker message dispatcher (see serve.js).
+   */
+  deliverNodeHandle(id: string, payload?: any) {
+    this.nodeHandles.get(id)?.(payload);
+  }
+
+  get icons() {
+    return [...this.iconSet];
+  }
+
+  // default auth methods to enabled
+  get_auth_enabled_by_role(role_id: number): Record<string, boolean> {
+    const auth_method_by_role = this.getConfig("auth_method_by_role", {});
+    const auth_methods = Object.keys(this.auth_methods);
+    auth_methods.unshift("Password");
+
+    const enabled: Record<string, boolean> = {};
+    if (!auth_method_by_role[role_id]) {
+      for (const auth_method of auth_methods) enabled[auth_method] = true;
+    } else {
+      for (const auth_method of auth_methods) {
+        const setVal = auth_method_by_role[role_id][auth_method];
+        enabled[auth_method] = typeof setVal === "undefined" ? true : setVal;
+      }
+    }
+    return enabled;
+  }
+
+  get pg_ts_config(): string {
+    const lang_dict: any = {
+      en: "english",
+      de: "german",
+      da: "danish",
+      fr: "french",
+      es: "spanish",
+      ar: "arabic",
+      it: "italian",
+      nl: "dutch",
+      no: "norwegian",
+      pt: "portuguese",
+      ru: "russian",
+      sv: "swedish",
+      //no pl, si, uk, zh in postgres
+    };
+    return lang_dict[this.getConfig("default_locale", "en")] || "simple";
+  }
+  async refresh_npmpkgs(noSignal?: boolean) {
+    if (this.npm_refresh_in_progess) return;
+    this.npm_refresh_in_progess = true;
+    const tenants_set_npm_modules = getRootState().getConfig(
+      "tenants_set_npm_modules",
+      false
+    );
+    const isRoot = db.getTenantSchema() === db.connectObj.default_schema;
+    if (!isRoot && !tenants_set_npm_modules) return;
+    const moduleStr: string = this.getConfigCopy("npm_available_js_code", "");
+    if (!moduleStr) return;
+    const moduleNames = moduleStr
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s);
+    if (moduleNames.length === 0) return;
+    if (!this.pluginManager) this.pluginManager = new PluginManager();
+    for (const moduleNameWithVersion of moduleNames) {
+      const [moduleName, version] = moduleNameWithVersion.split("==");
+      if (!this.codeNPMmodules[moduleName]) {
+        try {
+          if (
+            [
+              "fs",
+              "child_process",
+              "path",
+              "http",
+              "https",
+              "crypto",
+              "dns",
+              "os",
+              "process",
+              "net",
+              "querystring",
+              "stream",
+              "url",
+              "zlib",
+              "v8",
+              "http2",
+              "path",
+              "tls",
+            ].includes(moduleName)
+          ) {
+            if (process.env.IGNORE_DYNAMIC_REQUIRE !== "true") {
+              this.codeNPMmodules[moduleName] = require(moduleName);
+            }
+          } else {
+            const defaultVersion: any = {
+              cheerio: "1.0.0-rc.12",
+            };
+            await this.pluginManager.install(
+              moduleName,
+              version || defaultVersion[moduleName]
+            );
+
+            this.codeNPMmodules[moduleName] =
+              this.pluginManager.require(moduleName);
+          }
+        } catch (e) {
+          console.error("npm install error module", moduleName, e);
+        }
+      }
+    }
+    if (!noSignal && db.is_node)
+      this.processSend({ refresh: "npmpkgs", tenant: db.getTenantSchema() });
+    this.npm_refresh_in_progess = false;
+  }
+}
+
+/**
+ * Global
+ */
+let globalRoomEmitter: Function = () => {};
+let globalLogEmitter: Function = () => {};
+let globalCollabEmitter: Function = () => {};
+let globalDynamicUpdateEmitter: Function = () => {};
+let globalRestoreEmitter: Function = () => {};
+
+// the root tenant's state is singleton
+const singleton = new State(db.connectObj.default_schema || "public");
+
+// return current State object
+
+/**
+ * Get the state in the current tenant
+ * @function
+ * @returns {State}
+ */
+const getState = (): State | undefined => {
+  if (!db.is_it_multi_tenant()) return singleton;
+
+  const ten = db.getTenantSchema();
+  if (ten === db.connectObj.default_schema) return singleton;
+  else return tenants[ten];
+};
+// list of all tenants
+const tenants: Record<string, State> = {
+  [db.connectObj.default_schema || "public"]: singleton,
+};
+// list of tenants with other domains
+const otherdomaintenants: Record<string, string> = {};
+
+/**
+ * Get tenant that has another domain (not subdomain)
+ * @param {string} hostname
+ * @returns {object}
+ */
+const get_other_domain_tenant = (hostname: string) =>
+  otherdomaintenants[hostname];
+/**
+ * Get tenant from State
+ * @param {string} ten
+ * @returns {object}
+ */
+const getTenant = (ten: string) => {
+  //console.log({ ten, tenants });
+  if (ten === "public" || ten === db.connectObj.default_schema)
+    return singleton;
+  return tenants[ten];
+};
+
+//For user supplied strings
+const getApp__ = (): ((s: string) => string) => {
+  const ctx = db.getRequestContext();
+  const locale = ctx?.req?.getLocale();
+  const state = getState()!;
+  if (locale) {
+    if (state) return (s) => state.i18n.__({ phrase: s, locale }) || s;
+  }
+  // i18n uses fs internally, so the default locale fallback is node only
+  if (state && isNode()) {
+    const locale = state.getConfig("default_locale", "en");
+    return (s) => state.i18n.__({ phrase: s, locale }) || s;
+  }
+  return (s: string) => s;
+};
+
+//For builtin strings
+const getReq__ = (): ((s: string) => string) => {
+  const ctx = db.getRequestContext();
+  if (ctx?.req?.__) return ctx?.req?.__;
+  const state = getState();
+  if (!state || !isNode()) return (s: string) => s;
+  const locale = state.getConfig("default_locale", "en");
+  return (s) => state.i18n.__({ phrase: s, locale }) || s;
+};
+
+const getRootState = () => singleton;
+/**
+ * Returns all Tenants (from State)
+ */
+const getAllTenants = () => tenants;
+/**
+ * Remove protocol (http:// or https://) from domain url
+ * @param {string} url
+ * @returns {string}
+ */
+const get_domain = (url: string): string => {
+  const noproto = url.replace("https://", "").replace("http://", "");
+  return noproto.split("/")[0].split(":")[0];
+};
+/**
+ * Set tenant base url???
+ * From my point of view it just add tenant to list of otherdomaintenant
+ * @param {object} tenant_subdomain
+ * @param {string} [value] - new
+ */
+const set_tenant_base_url = (tenant_subdomain: string, value?: string) => {
+  const root_domain = get_domain(singleton.configs.base_url.value);
+  if (value) {
+    const cfg_domain = get_domain(value);
+    if (!cfg_domain.includes("." + root_domain))
+      otherdomaintenants[cfg_domain] = tenant_subdomain;
+  }
+};
+/**
+ * Switch to multi_tenant
+ * @param {object} plugin_loader
+ * @param {boolean} disableMigrate - if true then dont migrate db
+ * @param {string[]} tenantList
+ * @returns {Promise<void>}
+ */
+const init_multi_tenant = async (
+  plugin_loader: (s: string) => Promise<void>,
+  disableMigrate: boolean,
+  tenantList: string[],
+  setupMultiNodeListener: Function
+): Promise<void> => {
+  // for each domain
+  if (singleton?.configs?.base_url?.value) {
+    const cfg_domain = get_domain(singleton?.configs?.base_url.value);
+    otherdomaintenants[cfg_domain] = db.connectObj.default_schema || "public";
+  }
+
+  for (const domain of tenantList) {
+    try {
+      // create new state for each domain
+      tenants[domain] = new State(domain);
+      // make migration
+      if (!disableMigrate)
+        await db.runWithTenant(domain, () => migrate(domain, true));
+      // load plugins
+      await db.runWithTenant(domain, plugin_loader);
+      // set base_url
+      set_tenant_base_url(domain, tenants[domain].configs.base_url?.value);
+      if (setupMultiNodeListener) {
+        // listen on node updates channel for this tenant
+        await db.runWithTenant(domain, async () =>
+          setupMultiNodeListener(await db.getClient())
+        );
+      }
+    } catch (err: any) {
+      console.error(`init_multi_tenant error in domain ${domain}: `, err.stack);
+    }
+  }
+};
+/**
+ * Add tenant to State
+ * @param t
+ */
+const add_tenant = (t: string) => {
+  tenants[t] = new State(t);
+};
+
+/**
+ * Restart tenant (means reload of plugins)
+ * @param {object} plugin_loader
+ * @returns {Promise<void>}
+ */
+const restart_tenant = async (plugin_loader: Function) => {
+  const ten = db.getTenantSchema();
+  tenants[ten] = new State(ten);
+  await plugin_loader();
+};
+/**
+ * Process init time constant
+ */
+const process_init_time = new Date();
+/**
+ * Get Process Init Time - moment when Saltcorn process was initiated
+ * @returns {Date}
+ */
+const get_process_init_time = () => process_init_time;
+/**
+ * State Features - Help modules figure out what features are available in core saltcorn.
+ * This is necessary because modules need to work on different versions of core saltcorn
+ */
+const features = Object.freeze({
+  serve_static_dependencies: true,
+  deep_public_plugin_serve: true,
+  fieldrepeats_in_field_attributes: true,
+  no_plugin_fieldview_length_check: true,
+  bootstrap5: true,
+  version_plugin_serve_path: true,
+  prefix_or_in_queries: true,
+  json_state_query: true,
+  async_validate: true,
+  public_user_role: 100,
+  get_view_goto: true,
+  table_undo: true,
+  ellipsize: true,
+  aggregation_query: true,
+  list_builder: true,
+  esm_plugins: true,
+  stringify_json_fields: true,
+  dynamic_auth_parameters: true,
+  capacitor: true,
+  capacitor_version: 7,
+  workflows: true,
+  metadata: true,
+  multitype_fieldviews: true,
+  nested_fieldrepeats: true,
+  api_view_route: true,
+  file_fieldviews_cfg_workflows: true,
+  table_create_callback: true,
+  getrows_tree_field: true,
+  view_route_modal: true,
+  authorize_access_hooks: true,
+  navbar_set_expand: true,
+});
+
+export {
+  getState,
+  getTenant,
+  init_multi_tenant,
+  restart_tenant,
+  get_other_domain_tenant,
+  set_tenant_base_url,
+  get_process_init_time,
+  features,
+  add_tenant,
+  getAllTenants,
+  process_send,
+  getRootState,
+  getApp__,
+  getReq__,
+  State,
+};

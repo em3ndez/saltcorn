@@ -1,55 +1,169 @@
 {
   "name": "@saltcorn/data",
-  "version": "0.6.1",
+  "version": "1.7.0-beta.4",
   "description": "Data models for Saltcorn, open-source no-code platform",
   "homepage": "https://saltcorn.com",
   "scripts": {
-    "test": "jest --runInBand"
+    "test": "cd dist && NODE_ENV=test node --require ../setup-test-schema.cjs --test --test-concurrency=4 --test-force-exit",
+    "remote-queries-test": "REMOTE_QUERIES=true node --test --test-force-exit dist/tests/exact_views.test.js",
+    "gen:cjs-shims": "node gen-cjs-shims.cjs",
+    "pretsc": "node gen-cjs-shims.cjs",
+    "tsc": "tsc -p tsconfig.json",
+    "clean": "rm -rf ./dist/*",
+    "build": "webpack --mode development --config webpack.config.cjs"
   },
+  "type": "module",
   "author": "Tom Nielsen",
   "license": "MIT",
-  "main": "index.js",
+  "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./cjs/index.cjs",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./db": {
+      "types": "./dist/db/index.d.ts",
+      "require": "./cjs/db/index.cjs",
+      "import": "./dist/db/index.js",
+      "default": "./dist/db/index.js"
+    },
+    "./base-plugin": {
+      "types": "./dist/base-plugin/index.d.ts",
+      "require": "./cjs/base-plugin/index.cjs",
+      "import": "./dist/base-plugin/index.js",
+      "default": "./dist/base-plugin/index.js"
+    },
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "require": "./cjs/*.cjs",
+      "import": "./dist/*.js",
+      "default": "./dist/*.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "*": [
+        "dist/*",
+        "dist/db/*"
+      ]
+    }
+  },
+  "files": [
+    "dist/**/*",
+    "cjs/**/*.cjs",
+    "gen-cjs-shims.cjs",
+    "webpack.config.cjs",
+    "!dist/tsconfig.ref.tsbuildinfo"
+  ],
   "optionalDependencies": {
-    "@saltcorn/postgres": "0.6.1",
-    "@saltcorn/sqlite": "0.6.1"
+    "@saltcorn/postgres": "1.7.0-beta.4",
+    "@saltcorn/sqlite": "1.7.0-beta.4"
   },
   "dependencies": {
-    "@saltcorn/markup": "0.6.1",
-    "@saltcorn/db-common": "0.6.1",
-    "acorn": "^8.0.3",
-    "adm-zip": "0.5.5",
-    "astring": "^1.4.3",
+    "@saltcorn/types": "1.7.0-beta.4",
+    "@saltcorn/markup": "1.7.0-beta.4",
+    "@saltcorn/common-code": "1.7.0-beta.4",
+    "@saltcorn/db-common": "1.7.0-beta.4",
+    "@saltcorn/sqlite-mobile": "1.7.0-beta.4",
+    "@saltcorn/plain-date": "0.2.5",
+    "@aws-sdk/client-s3": "3.1057.0",
+    "@aws-sdk/s3-request-presigner": "3.1057.0",
+    "acorn": "^8.14.0",
+    "apns2": "11.8.0",
+    "assert": "^2.1.0",
+    "astring": "^1.9.0",
     "bcryptjs": "^2.4.3",
-    "blockly": "^6.20210701.0",
-    "bootstrap-email": "^1.1.1",
-    "connect-pg-simple": "^6.1.0",
+    "constants-browserify": "^1.0.0",
     "contractis": "^0.1.0",
-    "csv-stringify": "^5.5.0",
     "csvtojson": "^2.0.10",
-    "dateformat": "^3.0.3",
+    "dateformat": "^4.6.3",
+    "dockerode": "~4.0.4",
     "dumb-passwords": "^0.2.1",
     "email-validator": "^2.0.4",
-    "env-paths": "^2.2.0",
-    "estraverse": "^5.2.0",
-    "i18n": "^0.13.2",
-    "latest-version": "^5.1.0",
-    "moment": "^2.27.0",
-    "moment-timezone": "^0.5.33",
-    "node-fetch": "2.6.2",
-    "nodemailer": "^6.4.17",
+    "env-paths": "^2.2.1",
+    "estraverse": "^5.3.0",
+    "fs-extra": "^11.3.3",
+    "firebase-admin": "13.4.0",
+    "form-data": "3.0.4",
+    "fs-extended-attributes": "1.0.1",
+    "htmlparser2": "^8.0.2",
+    "https-proxy-agent": "^7.0.6",
+    "i18n": "^0.15.1",
+    "jwt-decode": "4.0.0",
+    "live-plugin-manager": "^1.0.0",
+    "markdown-it": "^14.1.0",
+    "mime-types": "^2.1.35",
+    "moment": "^2.29.4",
+    "moment-timezone": "^0.5.47",
+    "node-fetch": "2.6.9",
     "pluralize": "^8.0.0",
-    "tmp-promise": "^3.0.2",
-    "uuid": "^8.2.0"
+    "process": "0.11.10",
+    "punycode": "^2.3.1",
+    "simple-oauth2": "^5.1.0",
+    "tmp-promise": "^3.0.3",
+    "uuid": "^11.0.5",
+    "vm-browserify": "^1.1.2",
+    "web-push": "^3.6.7",
+    "buffer": "6.0.3",
+    "util": "0.12.5",
+    "os-browserify": "0.3.0",
+    "path-browserify": "1.0.1",
+    "stream-browserify": "3.0.0",
+    "stream-http": "3.2.0",
+    "stream-chain": "3.4.0",
+    "stream-json": "1.9.1",
+    "console-browserify": "1.2.0",
+    "crypto-browserify": "3.12.1",
+    "https-browserify": "1.0.0",
+    "browserify-zlib": "0.2.0",
+    "events": "3.3.0",
+    "string_decoder": "1.3.0",
+    "nodemailer": "^6.10.0",
+    "npm-registry-fetch": "17.1.0",
+    "mjml": "5.0.0-alpha.6",
+    "underscore": "1.13.7",
+    "unidecode": "1.1.0",
+    "tough-cookie": "2.5.0",
+    "vm2": "^3.11.6",
+    "xml2js": "0.6.2"
   },
   "repository": "github:saltcorn/saltcorn",
   "devDependencies": {
-    "chaos-guinea-pig": "^0.1.0",
-    "jest": "^25.1.0"
-  },
-  "jest": {
-    "testEnvironment": "node"
+    "@types/simple-oauth2": "5.0.7",
+    "@types/i18n": "^0.13.2",
+    "@types/bcryptjs": "^2.4.2",
+    "@types/dateformat": "^5.0.0",
+    "@types/dockerode": "^3.3.47",
+    "@types/dumb-passwords": "^0.2.1",
+    "@types/estraverse": "^5.1.1",
+    "@types/estree": "^1.0.8",
+    "@types/fs-extra": "^11.0.4",
+    "@types/jsonwebtoken": "^9.0.0",
+    "@types/mime-types": "2.1.1",
+    "@types/mjml": "4.7.4",
+    "@types/node": "^20.14.7",
+    "@types/node-fetch": "2.5.12",
+    "@types/nodemailer": "^6.4.4",
+    "@types/underscore": "^1.13.0",
+    "@types/stream-chain": "2.1.0",
+    "@types/stream-json": "1.7.8",
+    "@types/uuid": "^10.0.0",
+    "@types/web-push": "^3.6.4",
+    "@types/xml2js": "0.4.14",
+    "chaos-guinea-pig": "0.2.1",
+    "jsonwebtoken": "^9.0.2",
+    "typescript": "5.9.2",
+    "webpack": "5.97.1",
+    "webpack-cli": "6.0.1"
   },
   "publishConfig": {
     "access": "public"
+  },
+  "overrides": {
+    "undici": "7.12.0",
+    "parse5": "7.2.1",
+    "parse5-htmlparser2-tree-adapter": "7.0.0"
   }
 }

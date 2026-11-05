@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+    />
+    <script src="data/config.js"></script>
+    <!-- only set in test mode -->
+    <script src="data/test_schema.js"></script>
+    <script type="module" src="./dist/bundle.js"></script>
+    <script src="js/iframe_view_utils.js"></script>
+
+    <script type="module">
+      import { mobileApp } from "./dist/bundle.js";
+      if (window.saltcorn) window.saltcorn.mobileApp = mobileApp;
+      else window.saltcorn = { mobileApp };
+
+      if (Capacitor.getPlatform() !== "web") {
+        document.addEventListener("deviceready", () => {
+          saltcorn.mobileApp.init(_sc_mobile_config);
+        });
+      } else {
+        saltcorn.mobileApp.init(_sc_mobile_config);
+      }
+    </script>
+  </head>
+
+  <body>
+    <iframe
+      id="content-iframe"
+      style="
+        position: fixed;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        right: 0;
+        width: 100%;
+        height: 100%;
+        border: none;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        z-index: 999999;
+      "
+      src="splash_page.html"
+    >
+      <p>Your browser does not support iframes.</p>
+    </iframe>
+  </body>
+</html>

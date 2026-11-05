@@ -1,0 +1,313 @@
+build:
+  dockerfile: ./deploy/whale-ci/Dockerfile.dev
+
+run_tests_sqlite:
+  image: build
+  command:
+    - nice -n 15 saltcorn run-tests saltcorn-data
+    - nice -n 15 saltcorn run-tests server
+    - nice -n 15 saltcorn run-tests view-queries
+  extra_hosts:
+    - "example.com:127.0.0.1"
+    - "sub.example.com:127.0.0.1"
+    - "sub1.example.com:127.0.0.1"
+    - "sub2.example.com:127.0.0.1"
+    - "sub3.example.com:127.0.0.1"
+    - "sub4.example.com:127.0.0.1"
+    - "sub5.example.com:127.0.0.1"
+    - "otherexample.com:127.0.0.1"
+  environment:
+    SQLITE_FILEPATH: /tmp/testdb.sqlite
+    CI: true
+    SALTCORN_MULTI_TENANT: true
+    SALTCORN_SESSION_SECRET: "rehjtyjrtjr"
+    NODE_OPTIONS: --max-old-space-size=4096
+    SALTCORN_NWORKERS: 1
+    SALTCORN_JWT_SECRET: "2f75ade09981d68f366a4e577025440d10b735cc270fc2092077140f98a41dab331589c79364601150816d9a3c6f34abf881019e2097e21a24963c56b9135bbb"
+    SALTCORN_ACME_DIRECTORY_URL: "https://127.0.0.1:1/dir"
+    # workaround for prepareQueryEnviroment()
+    JSON_WEB_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbkBmb28uY29tIiwicm9sZV9pZCI6MSwiaXNzIjoic2FsdGNvcm5Ac2FsdGNvcm4iLCJhdWQiOiJzYWx0Y29ybi1tb2JpbGUtYXBwIiwiaWF0IjoxOTI0OTA1NjAwMDAwLCJleHAiOjE5MjQ5MDU2MDAwMDB9.eE370EdQr90y9woWDzeDzZgGVsUSlfAmtykeAJ_gJjA"
+          
+
+run_tests_postgres_db:
+  image: postgres
+  service: true
+  quiet: true
+  ready-on: CREATE DATABASE
+  environment:
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: saltcorn_test
+    POSTGRES_USER: postgres
+
+run_tests_postgres:
+  image: build
+  depends: run_tests_postgres_db 
+  delay: 1
+  command:
+    - psql -d saltcorn_test --command='create extension "uuid-ossp";'
+    - nice -n 15 saltcorn reset-schema -f   
+    - nice -n 15 saltcorn run-tests
+  extra_hosts:
+    - "example.com:127.0.0.1"
+    - "sub.example.com:127.0.0.1"
+    - "sub1.example.com:127.0.0.1"
+    - "sub2.example.com:127.0.0.1"
+    - "sub3.example.com:127.0.0.1"
+    - "sub4.example.com:127.0.0.1"
+    - "sub5.example.com:127.0.0.1"
+    - "otherexample.com:127.0.0.1"
+  environment:
+    PGHOST: run_tests_postgres_db
+    PGUSER: postgres
+    PGDATABASE: saltcorn_test
+    PGPASSWORD: postgres
+    CI: true
+    SALTCORN_MULTI_TENANT: true
+    SALTCORN_SESSION_SECRET: "rehjtyjrtjr"
+    NODE_OPTIONS: --max-old-space-size=4096 --enable-source-maps --require /opt/saltcorn/deploy/whale-ci/trc-stack-hook.js
+    SALTCORN_ACME_DIRECTORY_URL: "https://127.0.0.1:1/dir"
+
+run_tests_mysql_db:
+  image: mysql:8
+  service: true
+  quiet: true
+  ready-on: MySQL init process done
+  environment:
+    MYSQL_ROOT_PASSWORD: mysql
+    MYSQL_DATABASE: saltcorn_test
+
+run_tests_mysql:
+  image: build
+  depends: run_tests_mysql_db
+  delay: 5
+  command:
+    - npm install --legacy-peer-deps @saltcorn/mysql-backend
+    - saltcorn run-tests saltcorn-data
+    - saltcorn run-tests server
+    - saltcorn run-tests saltcorn-admin-models
+  extra_hosts:
+    - "example.com:127.0.0.1"
+    - "sub.example.com:127.0.0.1"
+    - "sub1.example.com:127.0.0.1"
+    - "sub2.example.com:127.0.0.1"
+    - "sub3.example.com:127.0.0.1"
+    - "sub4.example.com:127.0.0.1"
+    - "sub5.example.com:127.0.0.1"
+    - "otherexample.com:127.0.0.1"
+  environment:
+    SALTCORN_DB_DRIVER: "@saltcorn/mysql-backend"
+    PGHOST: run_tests_mysql_db
+    PGPORT: "3306"
+    PGUSER: root
+    PGPASSWORD: mysql
+    PGDATABASE: saltcorn_test
+    SALTCORN_DEFAULT_SCHEMA: saltcorn_test
+    SALTCORN_ACME_DIRECTORY_URL: "https://127.0.0.1:1/dir"
+    CI: true
+    SALTCORN_MULTI_TENANT: true
+    SALTCORN_SESSION_SECRET: "rehjtyjrtjr"
+    NODE_OPTIONS: --max-old-space-size=4096
+
+playwright_db:
+  image: postgres:16
+  service: true
+  #disable: true
+  quiet: true
+  ready-on: CREATE DATABASE
+  environment:
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: saltcorn_test
+    POSTGRES_USER: postgres
+
+
+playwright:
+  dockerfile: ./deploy/whale-ci/Dockerfile.e2e
+  #disable: true
+  depends: 
+    - build
+    - playwright_db
+  command:
+    - psql -d saltcorn_test --command='create extension "uuid-ossp";'
+    - nice -n 15 deploy/playwright/run.sh
+  extra_hosts:
+    - "example.com:127.0.0.1"
+    - "sub.example.com:127.0.0.1"
+    - "sub1.example.com:127.0.0.1"
+    - "sub2.example.com:127.0.0.1"
+    - "sub3.example.com:127.0.0.1"
+    - "sub4.example.com:127.0.0.1"
+    - "sub5.example.com:127.0.0.1"
+    - "otherexample.com:127.0.0.1"
+  environment:
+    PGHOST: playwright_db
+    PGUSER: postgres
+    PGDATABASE: saltcorn_test
+    PGPASSWORD: postgres
+    CI: true
+    SALTCORN_MULTI_TENANT: true
+    SALTCORN_SESSION_SECRET: "rehjtyjrtjr"
+    SALTCORN_NWORKERS: 2
+    SALTCORN_JWT_SECRET: "2f75ade09981d68f366a4e577025440d10b735cc270fc2092077140f98a41dab331589c79364601150816d9a3c6f34abf881019e2097e21a24963c56b9135bbb"
+
+email_tests_db:
+  image: postgres:16
+  service: true
+  quiet: true
+  ready-on: CREATE DATABASE
+  environment:
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: saltcorn_test
+    POSTGRES_USER: postgres
+
+email-tests-smtp:
+  image: greenmail/standalone:2.1.11
+  service: true
+  quiet: true
+  ready-on: Starting GreenMail API server
+  environment:
+    GREENMAIL_OPTS: -Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=saltcorn:scpassword@example.com
+
+email_tests:
+  image: build
+  depends:
+    - email_tests_db
+    - email-tests-smtp
+  command:
+    - psql -d saltcorn_test --command='create extension "uuid-ossp";'
+    - nice -n 15 saltcorn run-tests server -f tests/email_smtp.test.js
+  extra_hosts:
+    - "example.com:127.0.0.1"
+    - "sub.example.com:127.0.0.1"
+  environment:
+    PGHOST: email_tests_db
+    PGUSER: postgres
+    PGDATABASE: saltcorn_test
+    PGPASSWORD: postgres
+    CI: true
+    SALTCORN_MULTI_TENANT: true
+    SALTCORN_SESSION_SECRET: "rehjtyjrtjr"
+    NODE_OPTIONS: --max-old-space-size=4096
+    SALTCORN_TEST_SMTP_HOST: email-tests-smtp
+    SALTCORN_TEST_SMTP_PORT: "3025"
+    SALTCORN_TEST_IMAP_PORT: "3143"
+    SALTCORN_TEST_MAIL_API_PORT: "8080"
+    SALTCORN_TEST_SMTP_USER: saltcorn
+    SALTCORN_TEST_SMTP_PASSWORD: scpassword
+    SALTCORN_TEST_EMAIL_FROM: saltcorn@example.com
+
+s3_tests_db:
+  image: postgres:16
+  service: true
+  quiet: true
+  ready-on: CREATE DATABASE
+  environment:
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: saltcorn_test
+    POSTGRES_USER: postgres
+
+s3-tests-minio:
+  image: cgr.dev/chainguard/minio:latest
+  service: true
+  quiet: true
+  ready-on: "API: http://"
+  command: server /data
+  environment:
+    MINIO_ROOT_USER: saltcorn
+    MINIO_ROOT_PASSWORD: scsecretkey
+
+s3_tests:
+  image: build
+  depends:
+    - s3_tests_db
+    - s3-tests-minio
+  command:
+    - psql -d saltcorn_test --command='create extension "uuid-ossp";'
+    - nice -n 15 saltcorn run-tests server -f tests/s3_storage.test.js
+  extra_hosts:
+    - "example.com:127.0.0.1"
+    - "sub.example.com:127.0.0.1"
+  environment:
+    PGHOST: s3_tests_db
+    PGUSER: postgres
+    PGDATABASE: saltcorn_test
+    PGPASSWORD: postgres
+    CI: true
+    SALTCORN_MULTI_TENANT: true
+    SALTCORN_SESSION_SECRET: "rehjtyjrtjr"
+    NODE_OPTIONS: --max-old-space-size=4096
+    SALTCORN_TEST_S3_ENDPOINT: s3-tests-minio:9000
+    SALTCORN_TEST_S3_ACCESS_KEY: saltcorn
+    SALTCORN_TEST_S3_SECRET: scsecretkey
+
+pytest_db:
+  image: postgres:16
+  service: true
+  quiet: true
+  ready-on: CREATE DATABASE
+  environment:
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: saltcorn_test
+    POSTGRES_USER: postgres
+
+pytest:
+  image: build
+  depends: pytest_db 
+  command:
+    - psql -d saltcorn_test --command='create extension "uuid-ossp";'
+    - nice -n 15 pytest
+  extra_hosts:
+    - "example.com:127.0.0.1"
+    - "sub.example.com:127.0.0.1"
+    - "sub1.example.com:127.0.0.1"
+    - "sub2.example.com:127.0.0.1"
+    - "sub3.example.com:127.0.0.1"
+    - "sub4.example.com:127.0.0.1"
+    - "sub5.example.com:127.0.0.1"
+    - "otherexample.com:127.0.0.1"
+  environment:
+    PGHOST: pytest_db
+    PGUSER: postgres
+    PGDATABASE: saltcorn_test
+    PGPASSWORD: postgres
+    CI: true
+    SALTCORN_MULTI_TENANT: true
+    SALTCORN_SESSION_SECRET: "rehjtyjrtjr"
+    NODE_OPTIONS: --max-old-space-size=4096
+
+playwright_mobile_db:
+  image: postgres:16
+  service: true
+  quiet: true
+  ready-on: CREATE DATABASE
+  environment:
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: saltcorn_test
+    POSTGRES_USER: postgres
+
+playwright_mobile:
+  dockerfile: ./deploy/whale-ci/Dockerfile.e2e
+  depends: 
+    - build
+    - playwright_mobile_db
+  command:
+    - psql -d saltcorn_test --command='create extension "uuid-ossp";'
+    - nice -n 15 deploy/playwright_mobile/run.sh
+  extra_hosts:
+    - "example.com:127.0.0.1"
+    - "sub.example.com:127.0.0.1"
+    - "sub1.example.com:127.0.0.1"
+    - "sub2.example.com:127.0.0.1"
+    - "sub3.example.com:127.0.0.1"
+    - "sub4.example.com:127.0.0.1"
+    - "sub5.example.com:127.0.0.1"
+    - "otherexample.com:127.0.0.1"
+  environment:
+    PGHOST: playwright_mobile_db
+    PGUSER: postgres
+    PGDATABASE: saltcorn_test
+    PGPASSWORD: postgres
+    CI: true
+    SALTCORN_MULTI_TENANT: true
+    SALTCORN_SESSION_SECRET: "rehjtyjrtjr"
+    SALTCORN_JWT_SECRET: "2f75ade09981d68f366a4e577025440d10b735cc270fc2092077140f98a41dab331589c79364601150816d9a3c6f34abf881019e2097e21a24963c56b9135bbb"
+

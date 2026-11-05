@@ -1,0 +1,305 @@
+/*global saltcorn, $*/
+
+import { apiCall } from "./api";
+import { Capacitor } from "@capacitor/core";
+import { Camera, CameraResultType } from "@capacitor/camera";
+import { ScreenOrientation } from "@capacitor/screen-orientation";
+import { SendIntent } from "send-intent";
+import { addPushSyncHandler } from "./offline_mode";
+
+const orientationChangeListeners = new Set();
+
+/**
+ * Make the toast area shown at the bottom empty
+ */
+export function clearToasts() {
+  const iframe = document.getElementById("content-iframe");
+  const alertsArea =
+    iframe.contentWindow.document.getElementById("toasts-area");
+  alertsArea.innerHTML = "";
+}
+
+/**
+ * Show toasts in the toast area at the bottom
+ * @param toasts
+ * @returns
+ */
+export function showToasts(toasts) {
+  if (typeof saltcorn === "undefined") {
+    console.log("Not yet initalized.");
+    console.log(toasts);
+  } else {
+    const iframe = document.getElementById("content-iframe");
+    let area = iframe.contentWindow.document.getElementById("toasts-area");
+    if (!area) {
+      const areaHtml = `<div class="container">
+  <div 
+    id="toasts-area" 
+    class="toast-container position-fixed bottom-0 start-50 p-0" 
+    style="z-index: 9999;" 
+    aria-live="polite" 
+    aria-atomic="true">
+  </div>
+</div>`;
+      iframe.contentWindow.document
+        .getElementById("page-inner-content")
+        .insertAdjacentHTML("beforeend", areaHtml);
+      area = iframe.contentWindow.document.getElementById("toasts-area");
+    }
+    const successIds = [];
+    area.innerHTML = "";
+    for (const { type, msg, title } of toasts) {
+      const rndid = `tab${Math.floor(Math.random() * 16777215).toString(16)}`;
+      area.innerHTML += saltcorn.markup.toast(type, msg, rndid, title);
+      if (type === "success") successIds.push(rndid);
+    }
+    if (successIds.length > 0) {
+      setTimeout(() => {
+        for (const id of successIds) {
+          const toastEl = iframe.contentWindow.document.getElementById(id);
+          if (toastEl) $(toastEl).removeClass("show");
+        }
+      }, 5000);
+    }
+  }
+  return true;
+}
+
+/**
+ * Make the alert area at the top empty
+ */
+export function clearAlerts() {
+  const iframe = document.getElementById("content-iframe");
+  const area = iframe.contentWindow.document.getElementById("alerts-area");
+  if (area) area.innerHTML = "";
+  const topAlert = iframe.contentWindow.document.getElementById("top-alert");
+  if (topAlert) topAlert.innerHTML = "";
+}
+
+/**
+ * Show alerts in the alert area at the top
+ * @param alerts
+ */
+export function showAlerts(alerts) {
+  if (typeof saltcorn === "undefined") {
+    console.log("Not yet initalized.");
+    console.log(alerts);
+  } else {
+    for (const { type, msg, title } of alerts) {
+      const iframe = document.getElementById("content-iframe");
+      const area = iframe.contentWindow.document.getElementById("top-alert");
+      area.innerHTML += saltcorn.markup.alert(type, msg);
+    }
+  }
+}
+
+export function showLoadSpinner() {
+  const iframe = document.getElementById("content-iframe");
+  if (iframe) iframe.contentWindow.showLoadSpinner();
+}
+
+export function removeLoadSpinner() {
+  const iframe = document.getElementById("content-iframe");
+  if (iframe) iframe.contentWindow.removeLoadSpinner();
+}
+
+export function errorAlert(error) {
+  console.error(error);
+  showToasts([
+    {
+      type: "error",
+      msg: error.message ? error.message : "An error occured.",
+    },
+  ]);
+}
+
+// TODO combine with loadEncodedFile
+export async function loadFileAsText(fileId) {
+  try {
+    const response = await apiCall({
+      method: "GET",
+      path: `/files/download/${fileId}`,
+      responseType: "blob",
+    });
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        return resolve(reader.result);
+      };
+      reader.onerror = (error) => {
+        return reject(error);
+      };
+      reader.readAsText(response.data);
+    });
+  } catch (error) {
+    if (
+      !showToasts([
+        {
+          type: "error",
+          msg: error.message ? error.message : "An error occured.",
+        },
+      ])
+    );
+    throw error;
+  }
+}
+
+export async function loadEncodedFile(fileId) {
+  try {
+    const response = await apiCall({
+      method: "GET",
+      path: `/files/download/${fileId}`,
+      responseType: "blob",
+    });
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        return resolve(reader.result);
+      };
+      reader.onerror = (error) => {
+        return reject(error);
+      };
+      reader.readAsDataURL(response.data);
+    });
+  } catch (error) {
+    showToasts([
+      {
+        type: "error",
+        msg: error.message ? error.message : "An error occured.",
+      },
+    ]);
+  }
+}
+
+export async function takePhoto() {
+  try {
+    const image = await Camera.getPhoto({
+      quality: 90,
+      allowEditing: false,
+      resultType: CameraResultType.Uri,
+    });
+    return image.path;
+  } catch (error) {
+    showToasts([
+      {
+        type: "error",
+        msg: error.message ? error.message : "An error occured.",
+      },
+    ]);
+    return null;
+  }
+}
+
+export function registerScreenOrientationListener(name, listener) {
+  if (!orientationChangeListeners.has(name)) {
+    orientationChangeListeners.add(name, listener);
+    ScreenOrientation.addListener("screenOrientationChange", listener);
+  } else console.warn(`Listener with name ${name} already registered.`);
+}
+
+export async function getScreenOrientation() {
+  return await ScreenOrientation.orientation();
+}
+
+export async function finishShareIntent() {
+  SendIntent.finish();
+}
+
+export async function checkSendIntentReceived() {
+  try {
+    return await SendIntent.checkSendIntentReceived();
+  } catch (error) {
+    console.log("Error in checkSendIntentReceived: ", error);
+    return null;
+  }
+}
+
+/**
+ * init the push system, if available
+ */
+export async function tryInitPush(config) {
+  try {
+    const { initPushNotifications, addPusNotifyHandler } = await import(
+      "../helpers/notifications.js"
+    );
+    try {
+      await initPushNotifications();
+      if (saltcorn.data.utils.isPushEnabled(config.user)) addPusNotifyHandler();
+      if (config.pushSync) {
+        addPushSyncHandler();
+        if (Capacitor.getPlatform() === "ios") {
+          try {
+            const { initIosSilentPushListener } = await import(
+              "../helpers/ios_silent_push.js"
+            );
+            await initIosSilentPushListener();
+          } catch (e) {
+            console.log("iOS silent push not available:", e);
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Error initializing push notifications:", error);
+    }
+  } catch (error) {
+    console.log("Push notifications module not available:", error);
+  }
+}
+
+/**
+ * init background tasks (sync and/or push-sync heartbeat), if available
+ */
+export async function tryInitBackgroundSync(config) {
+  if (
+    !(config.syncInterval && config.syncInterval > 0) &&
+    !(config.pushSyncHeartbeatInterval && config.pushSyncHeartbeatInterval > 0)
+  )
+    return;
+  try {
+    const { initBackground } = await import("../helpers/background.js");
+    try {
+      await initBackground(
+        config.syncInterval,
+        config.pushSyncHeartbeatInterval
+      );
+    } catch (error) {
+      console.error("Error initializing background tasks:", error);
+    }
+  } catch (error) {
+    console.log("Background module not available:", error);
+  }
+}
+
+/**
+ * end the push system, if available
+ */
+export async function tryUnregisterPush() {
+  try {
+    const { unregisterPushNotifications } = await import(
+      "../helpers/notifications.js"
+    );
+    try {
+      await unregisterPushNotifications();
+    } catch (error) {
+      console.error("Error unregistering push notifications:", error);
+    }
+  } catch (error) {
+    console.log("Push notifications module not available:", error);
+  }
+}
+
+/**
+ * stop background tasks (sync and/or push-sync heartbeat), if available
+ */
+export async function tryStopBackgroundSync() {
+  try {
+    const { stopBackground } = await import("../helpers/background.js");
+    try {
+      await stopBackground();
+    } catch (error) {
+      console.error("Error stopping background tasks:", error);
+    }
+  } catch (error) {
+    console.log("Background module not available:", error);
+  }
+}

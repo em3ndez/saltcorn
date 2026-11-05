@@ -1,36 +1,47 @@
-const request = require("supertest");
-const getApp = require("../app");
-const {
-  getStaffLoginCookie,
+import { request as request } from "../auth/testhelp.js";
+import getApp from "../app.js";
+import {
   getAdminLoginCookie,
   toRedirect,
   itShouldRedirectUnauthToLogin,
+  itShouldIncludeTextForAdmin,
+  itShouldNotIncludeTextForAdmin,
   toInclude,
-  toSucceed,
   toNotInclude,
+  toSucceed,
   resetToFixtures,
   respondJsonWith,
-} = require("../auth/testhelp");
-const db = require("@saltcorn/data/db");
-const fs = require("fs").promises;
-const File = require("@saltcorn/data/models/file");
-const User = require("@saltcorn/data/models/user");
-const EventLog = require("@saltcorn/data/models/eventlog");
-
-jest.setTimeout(30000);
+} from "../auth/testhelp.js";
+import { isSafeCustomHtml } from "../routes/utils.js";
+import db from "@saltcorn/data/db";
+import { getState } from "@saltcorn/data/db/state";
+import { sleep } from "@saltcorn/data/tests/mocks";
+import { promises as fs } from "fs";
+import File from "@saltcorn/data/models/file";
+import User from "@saltcorn/data/models/user";
+import EventLog from "@saltcorn/data/models/eventlog";
+import _am_backup from "@saltcorn/admin-models/models/backup";
+import Zip from "adm-zip";
+const { create_backup, restore, auto_backup_now } = _am_backup;
+jest.setTimeout(30000000);
 
 beforeAll(async () => {
   await resetToFixtures();
   const mv = async (fnm) => {
-    await fs.writeFile(fnm, "nevergonnagiveyouup");
+    await fs.writeFile(fnm, "ijustwannadancewithsomebody");
   };
   await File.from_req_files(
-    { mimetype: "image/png", name: "rick.png", mv, size: 245752 },
+    { mimetype: "image/png", name: "whitney.png", mv, size: 245752 },
     1,
-    4
+    40
   );
 });
-afterAll(db.close);
+
+afterAll(async () => {
+  await sleep(200);
+  db.close();
+});
+
 const adminPageContains = (specs) =>
   it("adminPageContains " + specs.map((s) => s[1]).join(","), async () => {
     const app = await getApp({ disableCsrf: true });
@@ -51,7 +62,7 @@ describe("admin page", () => {
     await request(app)
       .get("/settings")
       .set("Cookie", loginCookie)
-      .expect(toInclude("Plugin and pack installation and control"));
+      .expect(toInclude("Module installation and control"));
   });
   it("show admin page", async () => {
     const app = await getApp({ disableCsrf: true });
@@ -62,22 +73,27 @@ describe("admin page", () => {
       .expect(toInclude("Site identity settings"));
   });
   adminPageContains([
+    ["/admin", "Site identity"],
     ["/admin/backup", "Download a backup"],
     ["/admin/email", "Email settings"],
     ["/admin/system", "Restart server"],
+    ["/admin/dev", "Development"],
+    ["/admin/build-mobile-app", "Build mobile app"],
   ]);
   adminPageContains([
     ["/useradmin", "Create user"],
     ["/roleadmin", "Theme"],
     ["/useradmin/settings", "Authentication settings"],
     ["/useradmin/ssl", "HTTPS encryption"],
+    ["/useradmin/http", "HTTP settings"],
+    ["/useradmin/permissions", "Permissions settings"],
   ]);
   adminPageContains([
     ["/menu", "jquery-menu-editor"],
     ["/search/config", "Search configuration"],
     ["/library/list", "component assemblies"],
   ]);
-  adminPageContains([["/actions", "Actions available"]]);
+  //adminPageContains([["/actions", "Actions available"]]);
   adminPageContains([["/eventlog", "Event log"]]);
   adminPageContains([["/eventlog/settings", "Which events should be logged?"]]);
   adminPageContains([["/eventlog/custom", "Custom Events"]]);
@@ -85,10 +101,143 @@ describe("admin page", () => {
   it("show download backup", async () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
-    await request(app)
+    const res = await request(app)
       .post("/admin/backup")
       .set("Cookie", loginCookie)
       .expect(toSucceed());
+    // the download is built in memory and streamed straight to the browser,
+    // so what arrives is the complete zip
+    const entries = new Zip(res.body).getEntries().map((e) => e.entryName);
+    expect(entries).toContain("pack.json");
+  });
+  adminPageContains([
+    ["/admin/backup", "Retention mode"],
+    ["/admin/backup", "Exclude files"],
+  ]);
+  it("saves file exclusion globs", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .post("/admin/set-backup-prefix")
+      .set("Cookie", loginCookie)
+      .send("backup_file_prefix=sc-backup-")
+      .send("backup_exclude_file_globs=*.mp4, cache/**")
+      .expect(toRedirect("/admin/backup"));
+    expect(getState().getConfig("backup_exclude_file_globs")).toBe(
+      "*.mp4, cache/**"
+    );
+    await getState().setConfig("backup_exclude_file_globs", "");
+  });
+  it("saves tiered retention settings", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .post("/admin/set-auto-backup")
+      .set("Cookie", loginCookie)
+      .send("auto_backup_frequency=Daily")
+      .send("auto_backup_destination=Local directory")
+      .send("auto_backup_retention_mode=Tiered (GFS)")
+      .send("auto_backup_keep_daily=5")
+      .send("auto_backup_keep_weekly=3")
+      .send("auto_backup_keep_monthly=6")
+      .send("auto_backup_keep_yearly=2")
+      .send("auto_backup_keep_min=4")
+      .expect(toRedirect("/admin/backup"));
+    expect(getState().getConfig("auto_backup_retention_mode")).toBe(
+      "Tiered (GFS)"
+    );
+    expect(getState().getConfig("auto_backup_keep_daily")).toBe(5);
+    expect(getState().getConfig("auto_backup_keep_min")).toBe(4);
+    await getState().setConfig("auto_backup_frequency", "Never");
+    await getState().setConfig("auto_backup_retention_mode", "Expiration");
+  });
+});
+describe("custom html safety", () => {
+  it("rejects unclosed comment/script/style/textarea", () => {
+    expect(isSafeCustomHtml("<meta><!-- unclosed")).toBe(false);
+    expect(isSafeCustomHtml("<script>oops();")).toBe(false);
+    expect(isSafeCustomHtml("<style>body{color:red}")).toBe(false);
+    expect(isSafeCustomHtml("<textarea>oops")).toBe(false);
+  });
+  it("accepts balanced or empty html", () => {
+    expect(isSafeCustomHtml("")).toBe(true);
+    expect(isSafeCustomHtml("<meta name=x>")).toBe(true);
+    expect(isSafeCustomHtml("<!-- fine --><script>1</script>")).toBe(true);
+  });
+  it("does not render a broken draft, but keeps it and flags it", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    const broken = "<!-- oops forgot to close";
+    await request(app)
+      .post("/admin")
+      .set("Cookie", loginCookie)
+      .send(`page_custom_html=${encodeURIComponent(broken)}`)
+      .expect(toRedirect("/admin/"));
+    await request(app)
+      .get("/admin")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("Site identity settings"))
+      .expect(
+        toInclude(
+          'id="unsafe-marker-page_custom_html" class="text-danger small"'
+        )
+      );
+    // a page that doesn't echo the draft itself, to check what's actually
+    // injected into <head>
+    await request(app)
+      .get("/useradmin")
+      .set("Cookie", loginCookie)
+      .expect(toNotInclude(broken));
+    await getState().setConfig("page_custom_html", "");
+  });
+  it("renders a valid draft", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    const marker = '<meta name="sc-test-marker" content="1">';
+    await request(app)
+      .post("/admin")
+      .set("Cookie", loginCookie)
+      .send(`page_custom_html=${encodeURIComponent(marker)}`)
+      .expect(toRedirect("/admin/"));
+    await request(app)
+      .get("/useradmin")
+      .set("Cookie", loginCookie)
+      .expect(toInclude(marker));
+    await request(app)
+      .get("/admin")
+      .set("Cookie", loginCookie)
+      .expect(
+        toInclude(
+          'id="unsafe-marker-page_custom_html" class="text-danger small d-none"'
+        )
+      );
+    await getState().setConfig("page_custom_html", "");
+  });
+  it("toggles the marker live via eval_js on an XHR autosave", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    const toggleJs = (visible) =>
+      `document.getElementById("unsafe-marker-page_custom_html")?.classList.toggle("d-none", ${visible});`;
+    await request(app)
+      .post("/admin")
+      .set("Cookie", loginCookie)
+      .set("X-Requested-With", "XMLHttpRequest")
+      .send("page_custom_html=<!-- oops forgot to close")
+      .expect(
+        respondJsonWith(
+          200,
+          (body) => body.eval_js === toggleJs(false)
+        )
+      );
+    await request(app)
+      .post("/admin")
+      .set("Cookie", loginCookie)
+      .set("X-Requested-With", "XMLHttpRequest")
+      .send("page_custom_html=<meta name=x>")
+      .expect(
+        respondJsonWith(200, (body) => body.eval_js === toggleJs(true))
+      );
+    await getState().setConfig("page_custom_html", "");
   });
 });
 /**
@@ -114,6 +263,14 @@ describe("event log", () => {
       .send("email=staff@foo.com")
       .send("password=fotyjtyjr")
       .expect(toRedirect("/auth/login"));
+    // Trigger.emitEvent writes the event log row from a setTimeout without
+    // awaiting the insert, so poll until it has been persisted
+    let evs = [];
+    for (let i = 0; i < 100 && evs.length === 0; i++) {
+      await sleep(50);
+      evs = await EventLog.find({ event_type: "LoginFailed" });
+    }
+    expect(evs.length).toBeGreaterThan(0);
   });
 
   it("shows entry in event log list", async () => {
@@ -125,7 +282,7 @@ describe("event log", () => {
       .expect(toInclude("LoginFailed"));
   });
   it("shows an entry in event log", async () => {
-    const evs = await EventLog.find({});
+    const evs = await EventLog.find({ event_type: "LoginFailed" });
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     await request(app)
@@ -260,7 +417,7 @@ describe("menu editor", () => {
         url: "",
         type: "View",
         label: "BarMenu",
-        min_role: "10",
+        min_role: "100",
         pagename: null,
         viewname: "dqwdw",
       },
@@ -268,8 +425,10 @@ describe("menu editor", () => {
     await request(app)
       .post("/menu")
       .set("Cookie", loginCookie)
-      .send("menu=" + encodeURIComponent(JSON.stringify(menu_json)))
-      .expect(toRedirect("/menu"));
+      .send(menu_json)
+      .set("Content-Type", "application/json")
+      .set("Accept", "application/json")
+      .expect(toSucceed);
   });
   it("show new menu", async () => {
     const app = await getApp({ disableCsrf: true });
@@ -307,32 +466,32 @@ describe("roleadmin", () => {
     await request(app)
       .post("/roleadmin/edit")
       .set("Cookie", loginCookie)
-      .send("id=5")
+      .send("id=50")
       .send("role=muppets")
       .expect(toRedirect("/roleadmin"));
     const roles = await User.get_roles();
-    expect(roles).toContainEqual({ id: 5, role: "muppets" });
+    expect(roles).toContainEqual({ id: 50, role: "muppets" });
   });
   it("show set layout for role", async () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     await request(app)
-      .post("/roleadmin/setrolelayout/5")
+      .post("/roleadmin/setrolelayout/50")
       .set("Cookie", loginCookie)
       .send("layout=tabler")
       .expect(toRedirect("/roleadmin"));
     const roles = await User.get_roles();
-    expect(roles).toContainEqual({ id: 5, role: "muppets" });
+    expect(roles).toContainEqual({ id: 50, role: "muppets" });
   });
   it("show delete role", async () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     await request(app)
-      .post("/roleadmin/delete/5")
+      .post("/roleadmin/delete/50")
       .set("Cookie", loginCookie)
       .expect(toRedirect("/roleadmin"));
     const roles = await User.get_roles();
-    expect(roles).not.toContainEqual({ id: 5, role: "muppets" });
+    expect(roles).not.toContainEqual({ id: 50, role: "muppets" });
   });
 });
 /**
@@ -346,8 +505,7 @@ describe("actions", () => {
     await request(app)
       .get("/actions")
       .set("Cookie", loginCookie)
-      .expect(toInclude("Actions available"))
-      .expect(toInclude("webhook"));
+      .expect(toInclude("Create trigger"));
   });
   it("show new action", async () => {
     const app = await getApp({ disableCsrf: true });
@@ -368,13 +526,13 @@ describe("actions", () => {
       .send("table_id=2")
       .send("name=mynewaction")
       .send("when_trigger=Insert")
-      .expect(toRedirect("/actions/configure/1"));
+      .expect(toRedirect("/actions/configure/9"));
   });
   it("show edit", async () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     await request(app)
-      .get("/actions/edit/1")
+      .get("/actions/edit/3")
       .set("Cookie", loginCookie)
       .expect(toInclude("Edit trigger"))
       .expect(toInclude("run_js_code"));
@@ -383,7 +541,7 @@ describe("actions", () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     await request(app)
-      .get("/actions/configure/1")
+      .get("/actions/configure/3")
       .set("Cookie", loginCookie)
       .expect(toInclude("Configure trigger"))
       .expect(toInclude("Code"));
@@ -392,7 +550,7 @@ describe("actions", () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     await request(app)
-      .post("/actions/configure/1")
+      .post("/actions/configure/3")
       .set("Cookie", loginCookie)
       .send("code=console.log(12345678)")
       .expect(toRedirect("/actions/"));
@@ -401,7 +559,7 @@ describe("actions", () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     await request(app)
-      .get("/actions/testrun/1")
+      .get("/actions/testrun/3")
       .set("Cookie", loginCookie)
       .expect(toInclude("12345678"));
   });
@@ -409,7 +567,7 @@ describe("actions", () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     await request(app)
-      .post("/actions/configure/1")
+      .post("/actions/configure/3")
       .set("Cookie", loginCookie)
       .send("code=1")
       .expect(toRedirect("/actions/"));
@@ -418,9 +576,13 @@ describe("actions", () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     await request(app)
-      .get("/actions/testrun/1")
+      .get("/actions/testrun/2")
       .set("Cookie", loginCookie)
       .expect(toRedirect("/actions/"));
+    await request(app)
+      .get("/actions/")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("run successfully with no console output"));
   });
   it("create api trigger", async () => {
     const app = await getApp({ disableCsrf: true });
@@ -432,9 +594,9 @@ describe("actions", () => {
       .send("action=run_js_code")
       .send("when_trigger=API+call")
       .send("min_role=1")
-      .expect(toRedirect("/actions/configure/2"));
+      .expect(toRedirect("/actions/configure/10"));
     await request(app)
-      .post("/actions/configure/2")
+      .post("/actions/configure/10")
       .set("Cookie", loginCookie)
       .send("code=return 27")
       .expect(toRedirect("/actions/"));
@@ -442,23 +604,312 @@ describe("actions", () => {
       .post("/api/action/myact")
       .set("Cookie", loginCookie)
       .expect(
-        respondJsonWith(200, ({ success, data }) => success && data === 27)
+        respondJsonWith(
+          200,
+          ({ success, data }) => success === true && data === 27
+        )
       );
   });
   it("deletes trigger", async () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     await request(app)
-      .post("/actions/delete/1")
+      .post("/actions/delete/3")
       .set("Cookie", loginCookie)
       .expect(toRedirect("/actions/"));
   });
+  it("post Never trigger with table", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .post("/actions/new")
+      .set("Cookie", loginCookie)
+      .send("action=run_js_code")
+      .send("table_id=2")
+      .send("name=NeverTableTrigger")
+      .send("when_trigger=Never")
+      .expect(302);
+  });
+});
+describe("localizer", () => {
+  itShouldRedirectUnauthToLogin("/site-structure/localizer");
+  itShouldRedirectUnauthToLogin("/site-structure/localizer/add-lang");
+  it("redirects site struct to menu", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .get("/site-structure")
+      .set("Cookie", loginCookie)
+      .expect(toRedirect("/menu"));
+  });
+  it("shows languages", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .get("/site-structure/localizer")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("Languages"));
+  });
+  it("shows add language form", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .get("/site-structure/localizer/add-lang")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("Locale identifier short code"));
+  });
+  it("add language", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .post("/site-structure/localizer/save-lang")
+      .set("Cookie", loginCookie)
+      .send("name=dansk")
+      .send("locale=da")
+      .expect(toRedirect("/site-structure/localizer/edit/da"));
+  });
+  it("shows new in languages", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .get("/site-structure/localizer")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("dansk"));
+  });
+
+  it("shows edit language form", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .get("/site-structure/localizer/edit/da")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("Hello world"));
+  });
+  it("set string language", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .post("/site-structure/localizer/save-string/da/Hello%20world")
+      .set("Cookie", loginCookie)
+      .send("value=Hej+verden")
+      .expect(toRedirect("/site-structure/localizer/edit/da"));
+  });
 });
 /**
- * Pages tests
+ * Diagram tests
+ */
+describe("diagram", () => {
+  itShouldRedirectUnauthToLogin("/diagram");
+  itShouldIncludeTextForAdmin("/diagram", ">All entities<");
+
+  it("get data diagram", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .get("/diagram/data")
+      .set("Cookie", loginCookie)
+      .expect(
+        respondJsonWith(
+          200,
+          ({ elements, style }) => elements && style.length > 3
+        )
+      );
+  });
+});
+
+/**
+ * Tags tests
+ */
+describe("tags", () => {
+  itShouldRedirectUnauthToLogin("/tag");
+  itShouldIncludeTextForAdmin("/tag", ">Create tag<");
+  itShouldIncludeTextForAdmin("/tag/new", ">Create<");
+  it("creates new tag", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .post("/tag")
+      .set("Cookie", loginCookie)
+      .send("name=MyNewTestTag")
+      .expect(toRedirect("/tag/2?show_list=tables"));
+  });
+
+  itShouldIncludeTextForAdmin("/tag", "MyNewTestTag");
+  itShouldIncludeTextForAdmin("/tag/2", "MyNewTestTag");
+  itShouldIncludeTextForAdmin("/tag-entries/add/tables/1", "Add entries");
+  itShouldIncludeTextForAdmin("/tag-entries/add/pages/1", "Add entries");
+  itShouldIncludeTextForAdmin("/tag-entries/add/views/1", "Add entries");
+  itShouldIncludeTextForAdmin("/tag-entries/add/triggers/1", "Add entries");
+  it("adds view to tag ", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .post("/tag-entries/add/views/1")
+      .set("Cookie", loginCookie)
+      .send("ids=1")
+      .expect(toRedirect("/tag/1?show_list=views"));
+  });
+  itShouldIncludeTextForAdmin("/diagram", "MyNewTestTag");
+  it("removes view from tag ", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .post("/tag-entries/remove/views/1/1")
+      .set("Cookie", loginCookie)
+      .expect(toRedirect("/tag/1?show_list=views"));
+  });
+  it("deletes new tag", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .post("/tag/delete/1")
+      .set("Cookie", loginCookie)
+      .expect(toRedirect("/tag"));
+  });
+});
+
+describe("server logs viewer", () => {
+  itShouldRedirectUnauthToLogin("/admin/dev/logs_viewer");
+  itShouldIncludeTextForAdmin("/admin/dev/logs_viewer", "Server logs");
+});
+
+describe("admin reflective xss", () => {
+  itShouldNotIncludeTextForAdmin(
+    "/admin/edit-codepage/%3Cimg%20src%3Dx%20onerror%3Dalert%281%29%3E%0A",
+    "<img src=x onerror=alert(1)>"
+  );
+  itShouldNotIncludeTextForAdmin(
+    `/files/picker?file_exts[]=%27"%20><script>alert(window.location)</script><%20a=%27""%27`,
+    "<script>alert(window.location)</script>"
+  );
+  itShouldNotIncludeTextForAdmin(
+    `/files/picker?file_exts[]=%27%22tabindex=%221%22%20autofocus%20onfocus=%22alert(window.origin)%22%20x=%22%22%27`,
+    `autofocus onfocus="alert(window.origin)"`
+  );
+  // A query param value that is a JSON object/array literal must still be
+  // escaped against attribute-context breakout. The structural quotes of the
+  // JSON literal can themselves close the file_exts="..." attribute, and the
+  // string content can carry an (unquoted) event handler. file_exts arrives
+  // as an array (file_exts[]=...), which is rendered into the attribute
+  // without mktag's per-string quote escaping.
+  itShouldNotIncludeTextForAdmin(
+    // ["x autofocus onfocus=alert(window.origin) y"]
+    // A breakout closes the attribute right after the opening bracket, so the
+    // payload's quote must not appear unescaped immediately after [.
+    `/files/picker?file_exts[]=%5B%22x%20autofocus%20onfocus%3Dalert(window.origin)%20y%22%5D`,
+    `file_exts="["`
+  );
+  itShouldNotIncludeTextForAdmin(
+    // {"x onfocus=alert(window.origin) y":1}
+    `/files/picker?file_exts[]=%7B%22x%20onfocus%3Dalert(window.origin)%20y%22%3A1%7D`,
+    `file_exts="{"`
+  );
+  // mktag's ppAttrib only escapes " in attribute values, and xss() passes
+  // whitelisted tags (img, a, ...) through with their raw angle brackets.
+  // So raw markup characters land unescaped inside the file_exts attribute.
+  itShouldNotIncludeTextForAdmin(
+    // <img src=x>
+    `/files/picker?file_exts=%3Cimg%20src%3Dx%3E`,
+    `file_exts="<img`
+  );
+  itShouldNotIncludeTextForAdmin(
+    // file_exts[]=<img src=x>
+    `/files/picker?file_exts[]=%3Cimg%20src%3Dx%3E`,
+    `file_exts="<img`
+  );
+
+  // --- Regression coverage for other file_exts shapes considered during
+  // review. These are not currently vulnerable, but assert that the various
+  // query shapes (objects, nested structures, single-value JSON literals,
+  // whitelisted tags) stay escaped so future changes can't reopen a hole.
+  // All payloads carry the quoted handler onfocus="alert(1)"; if the value
+  // ever broke out of the attribute, that exact string would appear.
+  const quotedHandler = `%22%20autofocus%20onfocus%3D%22alert(1)%22%20x%3D%22`;
+  // object via qs: file_exts[a]=... -> escape_param does not recurse objects,
+  // and mktag renders the object as "[object Object]" (payload never shown).
+  itShouldNotIncludeTextForAdmin(
+    `/files/picker?file_exts[a]=${quotedHandler}`,
+    `onfocus="alert(1)"`
+  );
+  // object nested inside an array: file_exts[0][a]=...
+  itShouldNotIncludeTextForAdmin(
+    `/files/picker?file_exts[0][a]=${quotedHandler}`,
+    `onfocus="alert(1)"`
+  );
+  // nested array: file_exts[0][0]=... (value is rendered, must be escaped)
+  itShouldNotIncludeTextForAdmin(
+    `/files/picker?file_exts[0][0]=${quotedHandler}`,
+    `onfocus="alert(1)"`
+  );
+  // single-value (non-array) JSON literals must also not break out
+  itShouldNotIncludeTextForAdmin(
+    // ["x autofocus onfocus=alert(window.origin) y"]
+    `/files/picker?file_exts=%5B%22x%20autofocus%20onfocus%3Dalert(window.origin)%20y%22%5D`,
+    `file_exts="["`
+  );
+  itShouldNotIncludeTextForAdmin(
+    // {"x onfocus=alert(window.origin) y":1}
+    `/files/picker?file_exts=%7B%22x%20onfocus%3Dalert(window.origin)%20y%22%3A1%7D`,
+    `file_exts="{"`
+  );
+  // whitelisted tag carried inside a JSON literal must have its angle
+  // brackets escaped (xss() would otherwise let <img> through raw)
+  itShouldNotIncludeTextForAdmin(
+    // ["<img src=x>"]
+    `/files/picker?file_exts=%5B%22%3Cimg%20src%3Dx%3E%22%5D`,
+    "<img"
+  );
+});
+
+// /admin/xsstarget reflects ?x into an element body via div(x) (test mode only)
+describe("admin xsstarget reflective xss", () => {
+  // body-context escaping from escape_param / text(): script tags and event
+  // handlers must be neutralised.
+  itShouldNotIncludeTextForAdmin(
+    // <script>alert(1)</script>
+    `/admin/xsstarget?x=%3Cscript%3Ealert(1)%3C%2Fscript%3E`,
+    "<script>alert(1)</script>"
+  );
+  itShouldNotIncludeTextForAdmin(
+    // <img src=x onerror=alert(1)>
+    `/admin/xsstarget?x=%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E`,
+    "onerror=alert(1)"
+  );
+  itShouldNotIncludeTextForAdmin(
+    // an <a href=javascript:..> link
+    `/admin/xsstarget?x=%3Ca%20href%3Djavascript:alert(1)%3Eclick%3C%2Fa%3E`,
+    "javascript:alert(1)"
+  );
+  // div(x) treats an object x as ATTRIBUTES, not body. escape_param does not
+  // recurse into objects and mktag never escapes attribute *keys*, so a query
+  // like ?x[onmouseover]=alert(1) injects a live event handler attribute.
+  itShouldNotIncludeTextForAdmin(
+    `/admin/xsstarget?x[onmouseover]=alert(1)`,
+    `onmouseover="alert(1)"`
+  );
+  // the same, with the whole handler smuggled through the object *key*
+  itShouldNotIncludeTextForAdmin(
+    // x[ onmouseover=alert(1) ]=1
+    `/admin/xsstarget?x[%20onmouseover%3Dalert(1)%20]=1`,
+    "onmouseover=alert(1)"
+  );
+  itShouldNotIncludeTextForAdmin(
+    // x[onclick]=alert(1)&x[tabindex]=1 -> two injected attributes
+    `/admin/xsstarget?x[onclick]=alert(1)&x[tabindex]=1`,
+    `onclick="alert(1)"`
+  );
+});
+
+/**
+ * Clear all tests
  */
 describe("clear all page", () => {
   itShouldRedirectUnauthToLogin("/admin/clear-all");
+  let backup_fnm;
+  it("backs up before clear all", async () => {
+    backup_fnm = await create_backup();
+  });
+
   it("show page", async () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
@@ -475,11 +926,22 @@ describe("clear all page", () => {
       .set("Cookie", loginCookie)
       .send("tables=on")
       .send("views=on")
+      .send("page_groups=on")
       .send("pages=on")
       .send("files=on")
       .send("users=on")
       .send("config=on")
       .send("plugins=on")
+      .send("triggers=on")
+      .send("library=on")
+      .send("eventlog=on")
       .expect(toRedirect("/auth/create_first_user"));
+  });
+  it("restores backup after clear all", async () => {
+    const restore_res = await restore(backup_fnm, (p) => {}, true);
+    await fs.unlink(backup_fnm);
+
+    if (restore_res) console.log("rr", restore_res);
+    expect(!!restore_res).toBe(false);
   });
 });

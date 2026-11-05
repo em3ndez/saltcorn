@@ -1,0 +1,1184 @@
+/*eslint-env browser*/
+/*global $, KTDrawer, reload_embedded_view, submitWithEmptyAction, is_paging_param, bootstrap, common_done, unique_field_from_rows, inline_submit_success, get_current_state_url, initialize_page, reset_spinners, apply_showif_fetching_urls */
+
+// Tapping a javascript: link silently does nothing on iOS, so we run the
+// code ourselves instead of relying on the link to do it.
+document.addEventListener("click", function (event) {
+  const link =
+    event.target.closest && event.target.closest("a[href^='javascript:']");
+  if (!link) return;
+  event.preventDefault();
+  const code = link.getAttribute("href").slice("javascript:".length);
+  try {
+    (0, eval)(code);
+  } catch (error) {
+    console.error("Error executing javascript: link:", error);
+  }
+});
+
+function combineFormAndQuery(form, query) {
+  let paramsList = [];
+  const formData = new FormData(form[0]);
+  for (const [k, v] of formData.entries()) {
+    paramsList.push(`${k}=${v}`);
+  }
+  let sp = new URLSearchParams(query);
+  for (let [k, v] of sp.entries()) {
+    if (k === "redirect") v = `get${v}`;
+    paramsList.push(`${k}=${v}`);
+  }
+  return paramsList.length > 0 ? `?${paramsList.join("&")}` : undefined;
+}
+
+/**
+ * Pass View or Page source into the app internal router,
+ * links with an URL source are opened in the system browser.
+ * @param {string} url
+ * @param {string} linkSrc - URL, View or Page
+ */
+async function execLink(url, linkSrc) {
+  if (linkSrc === "URL") {
+    parent.cordova.InAppBrowser.open(url, "_system");
+  } else
+    try {
+      if (document.getElementById("scspinner")) return;
+      showLoadSpinner();
+      if (url.startsWith("#")) {
+        const anchor = url.substring(1);
+        parent.saltcorn.mobileApp.navigation.setAnchor(anchor);
+      } else if (url.startsWith("javascript:")) eval(url.substring(11));
+      else {
+        const { path, query } =
+          parent.saltcorn.mobileApp.navigation.splitPathQuery(url);
+        const safePath = path.startsWith("http")
+          ? new URL(path).pathname
+          : path;
+        await parent.saltcorn.mobileApp.navigation.handleRoute(
+          `get${safePath}`,
+          query
+        );
+      }
+    } catch (error) {
+      parent.saltcorn.mobileApp.common.errorAlert(error);
+    } finally {
+      removeLoadSpinner();
+    }
+}
+
+async function runUrl(url, method = "get") {
+  const { path, query } =
+    parent.saltcorn.mobileApp.navigation.splitPathQuery(url);
+  const page = await parent.saltcorn.mobileApp.navigation.router.resolve({
+    pathname: `${method}${path}`,
+    query: query,
+  });
+  return page.content;
+}
+
+async function execNavbarLink(url) {
+  if (document.getElementById("scspinner")) return;
+  $(".navbar-toggler").click();
+  if (typeof KTDrawer === "function") {
+    const aside = $("#kt_aside")[0];
+    if (aside) {
+      const kAside = KTDrawer.getInstance(aside);
+      kAside.hide();
+    }
+  }
+  execLink(url);
+}
+
+/**
+ *
+ * @param {*} e
+ * @param {*} urlSuffix
+ * @returns
+ */
+async function formSubmit(e, urlSuffix, viewname, noSubmitCb, matchingState) {
+  try {
+    showLoadSpinner();
+    if (!noSubmitCb) e.submit();
+    const files = {};
+    const urlParams = new URLSearchParams();
+    const data = matchingState ? {} : null;
+    for (const entry of new FormData(e).entries()) {
+      // cordova-plugin-file replaces window.File with its own class, so a
+      // real picked file no longer passes "instanceof File" - Blob still
+      // works, since every File is also a Blob.
+      if (entry[1] instanceof Blob) files[entry[0]] = entry[1];
+      else {
+        // is there a hidden input with a filename?
+        const domEl = $(e).find(
+          `[name='${entry[0]}'][mobile-camera-input='true']`
+        );
+        if (domEl.length > 0) {
+          const tokens = entry[1].split("/");
+          const fileName = tokens[tokens.length - 1];
+          const directory = tokens.splice(0, tokens.length - 1).join("/");
+          const { buffer, file } =
+            await parent.saltcorn.mobileApp.fileSystem.readBinaryCordova(
+              fileName,
+              directory
+            );
+          files[entry[0]] = {
+            blob: new Blob([buffer], { type: file.type }),
+            fileObj: file,
+          };
+        } else if (!matchingState) urlParams.append(entry[0], entry[1]);
+        else data[entry[0]] = entry[1];
+      }
+    }
+    const queryStr = !matchingState
+      ? urlParams.toString()
+      : parent.saltcorn.mobileApp.navigation.currentQuery() || "";
+    await parent.saltcorn.mobileApp.navigation.handleRoute(
+      `post${urlSuffix}${viewname}`,
+      queryStr,
+      files,
+      data
+    );
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+function sc_form_submit_in_progress() {}
+
+async function ajaxSubmitForm(e, force_no_reload, event) {
+  const form = $(e).closest("form");
+  const action = form.attr("action");
+  if (event) event.preventDefault();
+  try {
+    const { isOfflineMode } =
+      parent.saltcorn.data.state.getState().mobileConfig;
+    let responseData = null;
+    if (isOfflineMode) {
+      const { path, query } =
+        parent.saltcorn.mobileApp.navigation.splitPathQuery(action);
+      const formData = new FormData(form[0]);
+      const data = {};
+      for (const [k, v] of formData.entries()) data[k] = v;
+      responseData = await parent.saltcorn.mobileApp.navigation.router.resolve({
+        pathname: `post${path}`,
+        query: query,
+        body: data,
+      });
+    } else {
+      const response = await parent.saltcorn.mobileApp.api.apiCall({
+        path: action,
+        method: "POST",
+        body: new FormData(form[0]),
+      });
+      responseData = response.data;
+    }
+    var no_reload = $("#scmodal").hasClass("no-submit-reload");
+    const on_close_reload_view = $("#scmodal").attr(
+      "data-on-close-reload-view"
+    );
+    $("#scmodal").modal("hide");
+    if (on_close_reload_view) {
+      const viewE = $(`[data-sc-embed-viewname="${on_close_reload_view}"]`);
+      if (viewE.length) reload_embedded_view(on_close_reload_view);
+      else if (!force_no_reload)
+        await parent.saltcorn.mobileApp.navigation.reload();
+    } else if (!force_no_reload && !no_reload)
+      await parent.saltcorn.mobileApp.navigation.reload();
+    else common_done(responseData, form.attr("data-viewname"));
+  } catch (error) {
+    // var title = request.getResponseHeader("Page-Title");
+    // if (title) $("#scmodal .modal-title").html(decodeURIComponent(title));
+    // var body = request.responseText;
+    // if (body) $("#scmodal .modal-body").html(body);
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  }
+}
+
+async function inline_local_submit(e, opts1) {
+  try {
+    e.preventDefault();
+    showLoadSpinner();
+    const opts = JSON.parse(decodeURIComponent(opts1 || "") || "{}");
+    const form = $(e.target).closest("form");
+    const urlParams = new URLSearchParams();
+    for (const entry of new FormData(form[0]).entries()) {
+      urlParams.append(entry[0], entry[1]);
+    }
+    const url = form.attr("action");
+    await parent.saltcorn.mobileApp.navigation.router.resolve({
+      pathname: `post${url}`,
+      query: urlParams.toString(),
+    });
+    inline_submit_success(e, form, opts);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.showToasts([
+      {
+        type: "error",
+        msg: error.message ? error.message : "An error occured.",
+      },
+    ]);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+function saveAndContinueAsync(e, action) {
+  return new Promise((resolve, _reject) => {
+    saveAndContinue(e, action, (x) => resolve(x));
+  });
+}
+
+// not currently generated by any server markup, kept for parity with web
+function saveAndContinueIfValid(e, action, event) {
+  setTimeout(() => {
+    if (
+      event &&
+      event.target &&
+      event.target.classList &&
+      event.target.classList.contains("no-form-change")
+    )
+      return;
+    const form = $(e).closest("form");
+    if (form[0].checkValidity?.() === false) {
+      form[0].reportValidity();
+      return;
+    }
+    saveAndContinue(e, action);
+  });
+}
+
+// auto_save's onChange - was undefined on mobile, silently dropping every edit
+function saveAndContinueDelayed(e, action, event, retries = 1) {
+  setTimeout(() => {
+    if (apply_showif_fetching_urls.size > 0 && retries < 5) {
+      setTimeout(() => {
+        saveAndContinueDelayed(e, action, event, retries + 1);
+      }, 200);
+    } else saveAndContinue(e, action);
+  });
+  return false;
+}
+
+async function saveAndContinue(e, action, k) {
+  try {
+    showLoadSpinner();
+    const form = $(e).closest("form");
+    submitWithEmptyAction(form[0]);
+    const queryStr = new URLSearchParams(new FormData(form[0])).toString();
+    const res = await parent.saltcorn.mobileApp.navigation.router.resolve({
+      pathname: `post${action}`,
+      query: queryStr,
+      xhr: true,
+    });
+    if (res.id && form.find("input[name=id")) {
+      form.append(
+        `<input type="hidden" class="form-control  " name="id" value="${res.id}">`
+      );
+    }
+    if (k) await k();
+    // TODO ch error (request.responseText?)
+    return res;
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+// SubmitWithAjax - undefined on mobile; follows the redirect saveAndContinue skips
+async function submitWithAjax(e) {
+  try {
+    const form = $(e).closest("form");
+    // action attr is always void(0) on mobile - use data-viewname instead
+    const res = await saveAndContinue(e, `/view/${form.attr("data-viewname")}`);
+    if (res?.error)
+      parent.saltcorn.mobileApp.common.showToasts([
+        { type: "error", msg: res.error },
+      ]);
+    const dest = res?.url_when_done || res?.redirect;
+    if (dest) {
+      const { path, query } =
+        parent.saltcorn.mobileApp.navigation.splitPathQuery(dest);
+      // "Back to referer" round-trips a get/... route through the server's
+      // sanitizer, which adds a leading "/" - strip it, don't double the prefix
+      const stripped = path.replace(/^\//, "");
+      const route =
+        stripped.startsWith("get/") || stripped.startsWith("post/")
+          ? stripped
+          : path.length > 1
+            ? `get${path}`
+            : path;
+      await parent.saltcorn.mobileApp.navigation.handleRoute(
+        route,
+        query
+      );
+    }
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  }
+}
+
+async function login(e, entryPoint, isSignup) {
+  try {
+    showLoadSpinner();
+    const formData = new FormData(e);
+    await parent.saltcorn.mobileApp.auth.login({
+      email: formData.get("email"),
+      password: formData.get("password"),
+      isSignup,
+      entryPoint,
+    });
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+async function publicLogin(entryPoint) {
+  try {
+    showLoadSpinner();
+    await parent.saltcorn.mobileApp.auth.publicLogin(entryPoint);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+async function logout() {
+  try {
+    showLoadSpinner();
+    await parent.saltcorn.mobileApp.auth.logout();
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+async function signupFormSubmit(e, entryView) {
+  try {
+    await login(e, entryView, true);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  }
+}
+
+async function loginFormSubmit(e, entryView) {
+  try {
+    let safeEntryView = entryView;
+    if (!safeEntryView) {
+      const config = parent.saltcorn.data.state.getState().mobileConfig;
+      if (!config.entry_point) throw new Error("Unable to find an entry-point");
+      safeEntryView = config.entry_point;
+    }
+    await login(e, safeEntryView, false);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  }
+}
+
+async function loginWith(strategyName) {
+  try {
+    console.log("login with", strategyName);
+    const methods = parent.saltcorn.data.state.getState().auth_methods;
+    if (!methods[strategyName])
+      throw new Error(`No such auth strategy: ${strategyName}`);
+    const modName = methods[strategyName].module_name;
+    if (!modName)
+      throw new Error(`Module name for '${strategyName}' is not defined.`);
+    const authModule = parent.saltcorn.mobileApp.plugins[modName];
+    if (!authModule)
+      throw new Error(`Authentication module '${modName}' not found.`);
+    await authModule.startLogin(strategyName);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  }
+}
+
+async function local_post_btn(e) {
+  try {
+    showLoadSpinner();
+    let path, query;
+    if (typeof e === "string") {
+      const pq = parent.saltcorn.mobileApp.navigation.splitPathQuery(e);
+      path = pq.path;
+      query = pq.query;
+    } else {
+      const form = $(e).closest("form");
+      const method = form.attr("method");
+      const pq = parent.saltcorn.mobileApp.navigation.splitPathQuery(
+        form.attr("action")
+      );
+      path = `${method}${pq.path}`;
+      query = pq.query;
+      combineFormAndQuery(form, query);
+    }
+    await parent.saltcorn.mobileApp.navigation.handleRoute(path, query);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+/**
+ *
+ * @param {*} e
+ * @param {*} path
+ */
+async function stateFormSubmit(e, path) {
+  try {
+    showLoadSpinner();
+    const formQuery = new URLSearchParams(new FormData(e)).toString();
+    await parent.saltcorn.mobileApp.navigation.handleRoute(path, formQuery);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+function removeQueryStringParameter(queryStr, key) {
+  let params = [];
+  for (const [k, v] of new URLSearchParams(queryStr).entries()) {
+    if (k !== key) {
+      params.push(`${k}=${v}`);
+    }
+  }
+  return params.join("&");
+}
+
+function updateQueryStringParameter(queryStr, key, value) {
+  if (!queryStr) {
+    return `${key}=${value}`;
+  }
+  let params = [];
+  let updated = false;
+  for (const [k, v] of new URLSearchParams(queryStr).entries()) {
+    if (k === key) {
+      params.push(`${key}=${value}`);
+      updated = true;
+    } else {
+      params.push(`${k}=${v}`);
+    }
+  }
+  if (!updated) {
+    params.push(`${key}=${value}`);
+  }
+  return params.join("&");
+}
+
+function invalidate_pagings(currentQuery) {
+  let newQuery = currentQuery;
+  const queryObj = Object.fromEntries(new URLSearchParams(newQuery).entries());
+  const toRemove = Object.keys(queryObj).filter((val) => is_paging_param(val));
+  for (const k of toRemove) {
+    newQuery = removeQueryStringParameter(newQuery, k);
+  }
+  return newQuery;
+}
+
+async function set_state_fields(kvs, disablePjax, e) {
+  try {
+    showLoadSpinner();
+    const current = get_current_state_url(e);
+    let queryParams = [];
+    const { path, query } =
+      parent.saltcorn.mobileApp.navigation.splitPathQuery(current);
+    let currentQuery = query || {};
+    if (Object.keys(kvs).some((k) => !is_paging_param(k))) {
+      currentQuery = invalidate_pagings(currentQuery);
+    }
+    Object.entries(kvs).forEach((kv) => {
+      if (kv[1].unset && kv[1].unset === true) {
+        currentQuery = removeQueryStringParameter(currentQuery, kv[0]);
+      } else {
+        currentQuery = updateQueryStringParameter(currentQuery, kv[0], kv[1]);
+      }
+    });
+    for (const [k, v] of new URLSearchParams(currentQuery).entries()) {
+      queryParams.push(`${k}=${v}`);
+    }
+    const queryStr = queryParams.join("&");
+    if (disablePjax)
+      await parent.saltcorn.mobileApp.navigation.handleRoute(path, queryStr);
+    else await pjax_to(path, queryStr, e);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+async function pjax_to(href, query, e) {
+  const safeHref = href.startsWith("get") ? href.substring(3) : href;
+  const path = `${safeHref}?${query}`;
+  let $modal = $("#scmodal");
+  const inModal = $modal.length && $modal.hasClass("show");
+  const localizer = e ? $(e).closest("[data-sc-local-state]") : [];
+  let $dest = localizer.length
+    ? localizer
+    : inModal
+      ? $("#scmodal .modal-body")
+      : $("#page-inner-content");
+  if (!$dest.length)
+    await parent.saltcorn.mobileApp.navigation.handleRoute(safeHref, query);
+  else
+    try {
+      const { isOfflineMode } =
+        parent.saltcorn.data.state.getState().mobileConfig;
+      let content;
+      if (isOfflineMode) {
+        const page = await parent.saltcorn.mobileApp.navigation.router.resolve(
+          {
+            pathname: `get${safeHref}`,
+            query: query,
+          }
+        );
+        if (page.redirect) {
+          const { path: redirectPath, query: redirectQuery } =
+            parent.saltcorn.mobileApp.navigation.splitPathQuery(
+              page.redirect
+            );
+          await parent.saltcorn.mobileApp.navigation.handleRoute(
+            redirectPath.startsWith("/") && redirectPath.length > 1
+              ? `get${redirectPath}`
+              : redirectPath,
+            redirectQuery
+          );
+          return;
+        }
+        content = typeof page === "string" ? page : page.content;
+      } else {
+        const headers = {
+          pjaxpageload: "true",
+        };
+        if (localizer.length) headers.localizedstate = "true";
+        const result = await parent.saltcorn.mobileApp.api.apiCall({
+          path: path,
+          method: "GET",
+          additionalHeaders: headers,
+          responseType: "text",
+        });
+        content = result.data;
+      }
+      if (!inModal && !localizer.length) {
+        // not sure for mobile
+        // window.history.pushState({ url: href }, "", href);
+      }
+      if (inModal && !localizer.length)
+        $(".sc-modal-linkout").attr("href", path);
+      $dest.html(content);
+      if (localizer.length) localizer.attr("data-sc-local-state", path);
+      initialize_page();
+    } catch (error) {
+      parent.saltcorn.mobileApp.common.errorAlert(error);
+    }
+}
+
+async function set_state_field(key, value, e) {
+  try {
+    showLoadSpinner();
+    const newhref = get_current_state_url(e);
+    const { path, query } =
+      parent.saltcorn.mobileApp.navigation.splitPathQuery(newhref);
+    await pjax_to(path, updateQueryStringParameter(query, key, value), e);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+async function unset_state_field(key, e) {
+  try {
+    showLoadSpinner();
+    const newhref = get_current_state_url(e);
+    const { path, query } =
+      parent.saltcorn.mobileApp.navigation.splitPathQuery(newhref);
+    await pjax_to(path, removeQueryStringParameter(query, key), e);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+async function sortby(k, desc, viewIdentifier, e) {
+  await set_state_fields(
+    {
+      [`_${viewIdentifier}_sortby`]: k,
+      [`_${viewIdentifier}_sortdesc`]: desc ? "on" : { unset: true },
+    },
+    false,
+    e
+  );
+}
+
+async function gopage(n, pagesize, viewIdentifier, extra, e) {
+  await set_state_fields(
+    {
+      ...extra,
+      [`_${viewIdentifier}_page`]: n,
+      [`_${viewIdentifier}_pagesize`]: pagesize,
+    },
+    false,
+    e
+  );
+}
+
+function ajax_modal(url, opts = {}) {
+  mobile_modal(url, opts);
+}
+
+async function mobile_modal(url, opts = {}) {
+  if ($("#scmodal").length === 0) {
+    $("body").append(`<div id="scmodal" class="modal">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Modal title</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close">            
+          </button>
+          <div
+            id="modal-toasts-area"
+            class="toast-container position-fixed top-0 start-50 p-0"
+            style: "z-index: 7000;"
+            aria-live="polite"
+            aria-atomic="true">
+          </div>
+        </div>
+        <div class="modal-body">
+          <p>Modal body text goes here.</p>
+        </div>
+      </div>
+    </div>
+  </div>`);
+  } else if ($("#scmodal").hasClass("show")) {
+    var myModalEl = document.getElementById("scmodal");
+    var modal = bootstrap.Modal.getInstance(myModalEl);
+    modal.dispose();
+  }
+  if (opts.submitReload === false) $("#scmodal").addClass("no-submit-reload");
+  else $("#scmodal").removeClass("no-submit-reload");
+  try {
+    const { path, query } =
+      parent.saltcorn.mobileApp.navigation.splitPathQuery(url);
+    const mobileConfig = parent.saltcorn.data.state.getState().mobileConfig;
+    if (
+      mobileConfig.networkState === "none" &&
+      mobileConfig.allowOfflineMode &&
+      !mobileConfig.isOfflineMode
+    ) {
+      await parent.saltcorn.mobileApp.offlineMode.startOfflineMode();
+      parent.saltcorn.mobileApp.navigation.clearHistory();
+      await parent.saltcorn.mobileApp.navigation.gotoEntryView();
+    } else {
+      const page = await parent.saltcorn.mobileApp.navigation.router.resolve({
+        pathname: `get${path}`,
+        query: query,
+        alerts: [],
+      });
+      const modalContent = typeof page === "string" ? page : page.content;
+      const title = page.title;
+      if (title) $("#scmodal .modal-title").html(title);
+      $("#scmodal .modal-body").html(modalContent);
+      new bootstrap.Modal($("#scmodal")).show();
+      // onOpen onClose initialize_page?
+    }
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.showToasts([
+      {
+        type: "error",
+        msg: error.message ? error.message : "An error occured.",
+      },
+    ]);
+  }
+}
+
+function closeModal() {
+  $("#scmodal").modal("toggle");
+}
+
+async function ajax_post(url, args) {
+  await local_post(url, args);
+}
+
+async function local_post(url, args) {
+  try {
+    showLoadSpinner();
+    const result = await parent.saltcorn.mobileApp.navigation.router.resolve({
+      pathname: `post${url}`,
+      data: args,
+    });
+    if (result.redirect)
+      await parent.saltcorn.mobileApp.navigation.handleRoute(result.redirect);
+    else await common_done(result, "", false);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+async function ajax_post_json(url, data, cb) {
+  await local_post_json(url, data, cb);
+}
+
+async function local_post_json(url, data, cb) {
+  try {
+    showLoadSpinner();
+    const result = await parent.saltcorn.mobileApp.navigation.router.resolve({
+      pathname: `post${url}`,
+      data: data,
+      query: parent.saltcorn.mobileApp.navigation.currentQuery(),
+    });
+    if (result.server_eval) await evalServerCode(url);
+    if (result.redirect)
+      await parent.saltcorn.mobileApp.navigation.handleRoute(result.redirect);
+    else await common_done(result, "", false);
+    if (cb?.success) cb.success(result);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+    if (cb?.error) cb.error(error);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+async function evalServerCode(url) {
+  await parent.saltcorn.mobileApp.api.apiCall({
+    method: "POST",
+    path: url,
+  });
+}
+
+async function make_unique_field(
+  id,
+  table_id,
+  field_name,
+  elem,
+  space,
+  start,
+  always_append,
+  char_type
+) {
+  const value = $(elem).val();
+  if (!value) return;
+  const path = `/api/${table_id}?approximate=true&${encodeURIComponent(
+    field_name
+  )}=${encodeURIComponent(value)}&fields=${encodeURIComponent(field_name)}`;
+  try {
+    // TODO ch support local tables
+    const response = await parent.saltcorn.mobileApp.api.apiCall({
+      method: "GET",
+      path,
+    });
+    if (response.data.success) {
+      unique_field_from_rows(
+        response.data.success,
+        id,
+        field_name,
+        space,
+        start,
+        always_append,
+        char_type,
+        value
+      );
+    }
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.showToasts([
+      {
+        type: "error",
+        msg: "unable to 'make_unique_field'",
+      },
+    ]);
+    console.error(error);
+  }
+}
+
+async function openFile(fileId) {
+  const config = parent.saltcorn.data.state.getState().mobileConfig;
+  const serverPath = config.server_path;
+  const url = `${serverPath}/files/serve/${encodeURIComponent(fileId)}`;
+  parent.cordova.InAppBrowser.open(
+    url,
+    "_blank",
+    // No clearcache - it clears cookies app-wide (Android's cookie store
+    // isn't scoped per tab), which would log the main app out too.
+    "location=no,toolbar=yes,toolbarposition=top"
+  );
+}
+
+function openInAppBrowser(url, domId) {
+  try {
+    $(`#${domId}`).find(".spinner-border").removeClass("d-none");
+    const ref = parent.cordova.InAppBrowser.open(
+      url,
+      "_blank",
+      // No clearcache - it clears cookies app-wide (Android's cookie store
+      // isn't scoped per tab), which would log the main app out too.
+      "location=no,toolbar=yes,toolbarposition=top"
+    );
+    ref.addEventListener("exit", function () {
+      $(`#${domId}`).find(".spinner-border").addClass("d-none");
+    });
+  } catch (error) {
+    $(`#${domId}`).find(".spinner-border").addClass("d-none");
+    parent.errorAlert(error);
+  }
+}
+
+async function select_id(id, e) {
+  try {
+    showLoadSpinner();
+    const newhref = get_current_state_url(e);
+    const { path, query } =
+      parent.saltcorn.mobileApp.navigation.splitPathQuery(newhref);
+    await pjax_to(path, updateQueryStringParameter(query, "id", id), e);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+async function check_state_field(that, e) {
+  try {
+    showLoadSpinner();
+    const newhref = get_current_state_url(e);
+    const { path, query } =
+      parent.saltcorn.mobileApp.navigation.splitPathQuery(newhref);
+    const checked = that.checked;
+    const name = that.name;
+    const value = encodeURIComponent(that.value);
+    const newQuery = checked
+      ? updateQueryStringParameter(query, name, value)
+      : removeQueryStringParameter(query, name);
+    await pjax_to(path, newQuery, e);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+async function clear_state(omit_fields_str, e) {
+  try {
+    showLoadSpinner();
+    const newhref = get_current_state_url(e);
+    const { path, query } =
+      parent.saltcorn.mobileApp.navigation.splitPathQuery(newhref);
+    let newQuery = "";
+    if (omit_fields_str) {
+      const omit_fields = omit_fields_str.split(",");
+      const params = new URLSearchParams(query);
+      for (const f of omit_fields) {
+        if (params.get(f))
+          updateQueryStringParameter(newQuery, f, params.get(f));
+      }
+    }
+    await pjax_to(path, newQuery, e);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+async function view_post(viewnameOrElem, route, data, onDone, sendState) {
+  const viewname =
+    typeof viewnameOrElem === "string"
+      ? viewnameOrElem
+      : $(viewnameOrElem)
+          .closest("[data-sc-embed-viewname]")
+          .attr("data-sc-embed-viewname");
+  window.last_route_viewname = viewname;
+  const buildQuery = () => {
+    const query = parent.saltcorn.mobileApp.navigation.currentQuery();
+    return query ? `?${query}` : "";
+  };
+  const mobileConfig = parent.saltcorn.data.state.getState().mobileConfig;
+  try {
+    showLoadSpinner();
+    let respData = undefined;
+    const query = sendState ? buildQuery() : "";
+    if (mobileConfig.isOfflineMode) {
+      respData = await parent.saltcorn.mobileApp.navigation.router.resolve({
+        pathname: `post/view/${viewname}/${route}`,
+        data,
+        query,
+      });
+    } else {
+      const response = await parent.saltcorn.mobileApp.api.apiCall({
+        method: "POST",
+        path: "/view/" + viewname + "/" + route + query,
+        body: data,
+      });
+      if (response) respData = response.data;
+    }
+
+    if (!respData)
+      throw new Error(`The response of '${viewname}/${route}' is ${respData}`);
+    if (onDone) await onDone(respData);
+    await common_done(respData, viewname, false);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+function setNetworSwitcherOn() {
+  $("#networkModeSwitcherId").prop("checked", true);
+  $("#onlineDescId").prop("class", "d-block");
+  $("#offlineDescId").prop("class", "d-none");
+}
+
+function setNetworkSwitcherOff() {
+  $("#networkModeSwitcherId").prop("checked", false);
+  $("#onlineDescId").prop("class", "d-none");
+  $("#offlineDescId").prop("class", "d-block");
+}
+
+async function switchNetworkMode() {
+  try {
+    const state = parent.saltcorn.data.state.getState();
+    const { isOfflineMode, networkState } = state.mobileConfig;
+    if (!isOfflineMode) {
+      await parent.saltcorn.mobileApp.offlineMode.startOfflineMode();
+      parent.saltcorn.mobileApp.navigation.clearHistory();
+      parent.saltcorn.mobileApp.navigation.addRoute({ route: "/" });
+      parent.saltcorn.mobileApp.navigation.addRoute({
+        route: "get/sync/sync_settings",
+      });
+      parent.saltcorn.mobileApp.common.showAlerts([
+        {
+          type: "info",
+          msg: parent.saltcorn.mobileApp.offlineMode.getOfflineMsg(),
+        },
+      ]);
+      parent.saltcorn.mobileApp.common.clearToasts();
+    } else {
+      if (networkState === "none")
+        throw new Error("No internet connection is available.");
+      await parent.saltcorn.mobileApp.offlineMode.endOfflineMode();
+      parent.saltcorn.mobileApp.navigation.clearHistory();
+      parent.saltcorn.mobileApp.navigation.addRoute({ route: "/" });
+      parent.saltcorn.mobileApp.navigation.addRoute({
+        route: "get/sync/sync_settings",
+      });
+      parent.saltcorn.mobileApp.common.showToasts([
+        {
+          type: "info",
+          msg: "You are online again.",
+        },
+      ]);
+      parent.saltcorn.mobileApp.common.clearAlerts();
+    }
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.showToasts([
+      {
+        type: "error",
+        msg: `Unable to change the network mode: ${
+          error.message ? error.message : "Unknown error"
+        }`,
+      },
+    ]);
+  } finally {
+    const { isOfflineMode } =
+      parent.saltcorn.data.state.getState().mobileConfig;
+    if (isOfflineMode) setNetworkSwitcherOff();
+    else setNetworSwitcherOn();
+  }
+}
+
+async function callSync() {
+  try {
+    const mobileConfig = parent.saltcorn.data.state.getState().mobileConfig;
+    if (mobileConfig.networkState === "none") {
+      parent.saltcorn.mobileApp.common.showToasts([
+        {
+          type: "error",
+          msg: "You don't have an internet connection.",
+        },
+      ]);
+    } else {
+      const wasOffline = mobileConfig.isOfflineMode;
+      showLoadSpinner();
+      const alerts = [];
+      await parent.saltcorn.mobileApp.offlineMode.sync(true, true, alerts);
+      parent.saltcorn.mobileApp.common.clearToasts();
+      if (!wasOffline) {
+        alerts.push({
+          type: "info",
+          msg: "Synchronized your offline data.",
+        });
+        parent.saltcorn.mobileApp.common.showToasts(alerts);
+      } else {
+        setNetworSwitcherOn();
+        parent.saltcorn.mobileApp.navigation.clearHistory();
+        parent.saltcorn.mobileApp.navigation.addRoute({ route: "/" });
+        parent.saltcorn.mobileApp.navigation.addRoute({
+          route: "get/sync/sync_settings",
+        });
+        alerts.push({
+          type: "info",
+          msg: "Synchronized your offline data, you are online again.",
+        });
+        parent.saltcorn.mobileApp.common.showToasts(alerts);
+        parent.saltcorn.mobileApp.common.clearAlerts();
+      }
+    }
+  } catch (error) {
+    console.log(error);
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  } finally {
+    removeLoadSpinner();
+  }
+}
+
+async function deleteOfflineDataClicked() {
+  const lastOfflineSession =
+    await parent.saltcorn.mobileApp.offlineMode.getLastOfflineSession();
+  const { user } = parent.saltcorn.data.state.getState().mobileConfig;
+  if (!lastOfflineSession?.offlineUser) {
+    parent.saltcorn.mobileApp.common.showToasts([
+      {
+        type: "error",
+        msg: "You don't have any offline data.",
+      },
+    ]);
+  } else if (lastOfflineSession.offlineUser !== user.email) {
+    parent.saltcorn.mobileApp.common.showToasts([
+      {
+        type: "error",
+        msg: `The offline data is owned by '${lastOfflineSession.offlineUser}'.`,
+      },
+    ]);
+  } else {
+    mobile_modal("/sync/ask_delete_offline_data");
+  }
+}
+
+function showLoadSpinner() {
+  if (!parent.saltcorn.mobileApp.navigation.isHtmlFile()) {
+    const spinner = $("#scspinner");
+    if (spinner.length === 0) {
+      $("body").append(`
+      <div 
+        id="scspinner" 
+        style="position: fixed;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          z-index: 9999;"
+        spinner-count="1"
+      >
+        <div 
+          style="position: absolute;
+            left: 50%;
+            top: 50%;
+            height: 60px;
+            width: 250px;
+            margin: 0px auto;"
+        >
+          <span 
+            class="spinner-border d-block"
+            role="status"
+          >
+            <span class="visually-hidden">Loading...</span>
+          </span>
+          <span 
+            style="margin-left: -125px"
+            id="scspinner-text-id"
+            class="d-none fs-5 fw-bold bg-secondary text-white p-1 rounded"
+          >
+          </span>
+        </div>
+      </div>`);
+    } else {
+      const count = parseInt(spinner.attr("spinner-count")) + 1;
+      spinner.attr("spinner-count", count);
+    }
+  }
+}
+
+function removeLoadSpinner() {
+  if (!parent.saltcorn.mobileApp.navigation.isHtmlFile()) {
+    const spinner = $("#scspinner");
+    if (spinner.length > 0) {
+      const count = parseInt(spinner.attr("spinner-count")) - 1;
+      if (count === 0) spinner.remove();
+      else spinner.attr("spinner-count", count);
+    }
+    if (typeof reset_spinners === "function") reset_spinners();
+  }
+}
+
+/**
+ * is called when an input with capture=camera is used
+ * It takes a picture with the camera plugin, saves the file, and adds the filename as a hidden input.
+ * @param {*} fieldName
+ */
+async function getPicture(fieldName) {
+  try {
+    const form = $(`#cptbtn${fieldName}`).closest("form");
+    const onsubmit = form.attr("onsubmit");
+    form.attr("onsubmit", "javascript:void(0)");
+    const fileURI = await parent.saltcorn.mobileApp.common.takePhoto("uri");
+    form.attr("onsubmit", onsubmit);
+    const inputId = `input${fieldName}`;
+    form.find(`#${inputId}`).remove();
+    form.append(
+      `<input class="d-none" id="${inputId}" name="${fieldName}" value="${fileURI}" mobile-camera-input="true" />`
+    );
+    const tokens = fileURI.split("/");
+    $(`#cpt-file-name-${fieldName}`).text(tokens[tokens.length - 1]);
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  }
+}
+
+async function updateMatchingRows(e, viewname) {
+  try {
+    const form = $(e).closest("form");
+    await formSubmit(
+      form[0],
+      "/view/",
+      `${viewname}/update_matching_rows`,
+      false,
+      true
+    );
+  } catch (error) {
+    parent.saltcorn.mobileApp.common.errorAlert(error);
+  }
+}
+
+function reload_on_init() {
+  console.log("not yet supported");
+}
+
+window.runUrl = runUrl;
+window.execNavbarLink = execNavbarLink;
+window.sc_form_submit_in_progress = sc_form_submit_in_progress;
+window.ajaxSubmitForm = ajaxSubmitForm;
+window.inline_local_submit = inline_local_submit;
+window.saveAndContinueAsync = saveAndContinueAsync;
+window.publicLogin = publicLogin;
+window.logout = logout;
+window.signupFormSubmit = signupFormSubmit;
+window.loginFormSubmit = loginFormSubmit;
+window.loginWith = loginWith;
+window.local_post_btn = local_post_btn;
+window.stateFormSubmit = stateFormSubmit;
+window.set_state_field = set_state_field;
+window.unset_state_field = unset_state_field;
+window.sortby = sortby;
+window.gopage = gopage;
+window.ajax_modal = ajax_modal;
+window.closeModal = closeModal;
+window.ajax_post = ajax_post;
+window.ajax_post_json = ajax_post_json;
+window.make_unique_field = make_unique_field;
+window.openFile = openFile;
+window.openInAppBrowser = openInAppBrowser;
+window.select_id = select_id;
+window.check_state_field = check_state_field;
+window.clear_state = clear_state;
+window.view_post = view_post;
+window.switchNetworkMode = switchNetworkMode;
+window.callSync = callSync;
+window.deleteOfflineDataClicked = deleteOfflineDataClicked;
+window.getPicture = getPicture;
+window.updateMatchingRows = updateMatchingRows;
+window.reload_on_init = reload_on_init;

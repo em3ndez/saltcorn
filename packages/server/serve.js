@@ -4,45 +4,242 @@
  * @category server
  * @module serve
  */
-const runScheduler = require("@saltcorn/data/models/scheduler");
-const User = require("@saltcorn/data/models/user");
-const Plugin = require("@saltcorn/data/models/plugin");
-const db = require("@saltcorn/data/db");
-const {
+import { fileURLToPath as __fileURLToPath } from "url";
+import { dirname as __pathDirname } from "path";
+const __filename = __fileURLToPath(import.meta.url);
+const __dirname = __pathDirname(__filename);
+import { runScheduler } from "@saltcorn/data/models/scheduler";
+import User from "@saltcorn/data/models/user";
+import Plugin from "@saltcorn/data/models/plugin";
+import db from "@saltcorn/data/db";
+import { getConfigFile, configFilePath } from "@saltcorn/data/db/connect";
+import {
   getState,
+  getRootState,
   init_multi_tenant,
-  create_tenant,
   restart_tenant,
-} = require("@saltcorn/data/db/state");
+  add_tenant,
+  get_other_domain_tenant,
+} from "@saltcorn/data/db/state";
+import _am_tenant from "@saltcorn/admin-models/models/tenant";
+const { create_tenant, eachTenant, getAllTenants } = _am_tenant;
+import path from "path";
 
-const path = require("path");
+import getApp from "./app.js";
+import systemd from "./systemd.js";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+import Trigger from "@saltcorn/data/models/trigger";
+import cluster from "cluster";
+import { getConfig, setConfig } from "@saltcorn/data/models/config";
+import { migrate } from "@saltcorn/data/migrate";
+import * as socketio from "socket.io";
+import { createAdapter, setupPrimary } from "@socket.io/cluster-adapter";
+import {
+  setTenant,
+  getSessionStore,
+  get_tenant_from_req,
+} from "./routes/utils.js";
+import passport from "passport";
+const { authenticate } = passport;
+import View from "@saltcorn/data/models/view";
+import {
+  listenForChanges,
+  getRelevantPackages,
+  getPluginDirectories,
+} from "./restart_watcher.js";
+import _am_backup from "@saltcorn/admin-models/models/backup";
+const { auto_backup_now } = _am_backup;
+import Snapshot from "@saltcorn/admin-models/models/snapshot";
+import { writeFileSync, rmSync, readFileSync, readdirSync } from "fs";
+import fsExtra from "fs-extra";
+const { pathExistsSync } = fsExtra;
+import envPaths from "env-paths";
+import {
+  isSocketEventMsg,
+  forwardPrimarySocketEmits as _forwardPrimarySocketEmits,
+} from "./socket_forwarding.js";
 
-const getApp = require("./app");
-const Trigger = require("@saltcorn/data/models/trigger");
-const cluster = require("cluster");
-const {
-  loadAllPlugins,
-  loadAndSaveNewPlugin,
-  loadPlugin,
-} = require("./load_plugins");
-const { getConfig } = require("@saltcorn/data/models/config");
-const { migrate } = require("@saltcorn/data/migrate");
-const socketio = require("socket.io");
-const { createAdapter, setupPrimary } = require("@socket.io/cluster-adapter");
-const { setTenant, getSessionStore } = require("./routes/utils");
-const passport = require("passport");
-const { authenticate } = require("passport");
-const View = require("@saltcorn/data/models/view");
+const forwardPrimarySocketEmits = () =>
+  _forwardPrimarySocketEmits(getState(), () =>
+    Object.values(cluster.workers || {})
+  );
 
-// helpful https://gist.github.com/jpoehls/2232358
+const take_snapshot = async () => {
+  return await Snapshot.take_if_changed();
+};
 
 /**
- * @param {object} opts
+ * Ensure the cfg file has a jwt_secret
+ */
+const ensureJwtSecret = () => {
+  const cfg = getConfigFile();
+  if (cfg && !cfg.jwt_secret) {
+    try {
+      const newSecret = require("crypto").randomBytes(64).toString("hex");
+      cfg.jwt_secret = newSecret;
+      writeFileSync(configFilePath, JSON.stringify(cfg, null, 2));
+      db.connectObj.jwt_secret = newSecret;
+    } catch (error) {
+      console.log(
+        `Unable to set a jwt_secret: ${
+          error.message ? error.message : "Unknown error"
+        }`
+      );
+    }
+  }
+};
+
+/**
+ * validate all plugins folders and remove invalid entries
+ * A folder is invalid when it has dependencies but not node_modules directory
+ */
+const ensurePluginsFolder = async () => {
+  const rootFolder = envPaths("saltcorn", { suffix: "plugins" }).data;
+  const staticDeps = [
+    "@saltcorn/markup",
+    "@saltcorn/data",
+    "@saltcorn/postgres",
+    "jest",
+  ];
+  const allPluginFolders = new Set();
+  const localPluginParentDirs = new Set();
+  await eachTenant(async () => {
+    try {
+      const allPlugins = (await Plugin.find()).filter(
+        (p) => !["base", "sbadmin2"].includes(p.name)
+      );
+      for (const plugin of allPlugins) {
+        const tokens =
+          plugin.source === "npm"
+            ? plugin.location.split("/")
+            : plugin.name.split("/");
+        const pluginDir = path.join(
+          rootFolder,
+          plugin.source === "git" ? "git_plugins" : "plugins_folder",
+          ...tokens,
+          plugin.version || "unknownversion"
+        );
+        allPluginFolders.add(pluginDir);
+        if (plugin.source === "local") {
+          localPluginParentDirs.add(
+            path.join(rootFolder, "plugins_folder", ...tokens)
+          );
+        }
+      }
+    } catch {
+      //ignore
+    }
+  });
+  // Remove leftover cache-busted localversion_<timestamp> directories
+  for (const parentDir of localPluginParentDirs) {
+    try {
+      if (!pathExistsSync(parentDir)) continue;
+      for (const entry of readdirSync(parentDir)) {
+        if (/^localversion_\d+$/.test(entry)) {
+          rmSync(path.join(parentDir, entry), { recursive: true });
+        }
+      }
+    } catch (e) {
+      console.log(`Error cleaning localversion cache dirs: ${e.message || e}`);
+    }
+  }
+  for (const folder of allPluginFolders) {
+    try {
+      if (pathExistsSync(folder)) {
+        const packageJson = JSON.parse(
+          readFileSync(path.join(folder, "package.json"))
+        );
+        if (
+          (Object.keys(packageJson.dependencies || {}).some(
+            (d) => !staticDeps.includes(d)
+          ) ||
+            Object.keys(packageJson.devDependencies || {}).some(
+              (d) => !staticDeps.includes(d)
+            )) &&
+          !pathExistsSync(path.join(folder, "node_modules"))
+        )
+          rmSync(folder, { recursive: true });
+      }
+    } catch (e) {
+      console.log(`Error checking plugin folder: ${e.message || e}`);
+    }
+  }
+};
+
+/**
+ * Users with push_notify enabled store subscription in push_notification_subscriptions
+ * This function ensures that enabled users at least have an empty array
+ * and disabled users have no entry
+ */
+const ensureNotificationSubscriptions = async () => {
+  const allSubs = await getConfig("push_notification_subscriptions", {});
+  let changed = false;
+  for (const user of await User.find()) {
+    const enabled = user._attributes?.notify_push || false;
+    if (enabled && !allSubs[user.id]) {
+      allSubs[user.id] = [];
+      changed = true;
+    } else if (!enabled && allSubs[user.id]) {
+      delete allSubs[user.id];
+      changed = true;
+    }
+  }
+  if (changed) {
+    await setConfig("push_notification_subscriptions", { ...allSubs });
+  }
+};
+
+const getMultiNodeListener = (client) => {
+  return async () => {
+    await client.query(`LISTEN ${db.getTenantSchema()}_events`);
+    client.on("notification", (msg) => {
+      if (msg.processId === client.processID)
+        return; // check self echo via connection pid
+      else {
+        try {
+          const payload = JSON.parse(msg.payload);
+          if (
+            payload.dynamic_update ||
+            payload.real_time_collab_event ||
+            payload.real_time_chat_event ||
+            payload.log_event ||
+            payload.restore_progress_event
+          ) {
+            const workers = Object.values(cluster.workers || {});
+            if (workers.length > 0) {
+              // use only one worker, master has no serversocket
+              workers[0].send(payload);
+            } else workerDispatchMsg(payload); // only master
+          } else {
+            Object.entries(cluster.workers).forEach(([wpid, w]) => {
+              w.send(payload);
+            });
+            workerDispatchMsg(payload); //also master
+          }
+        } catch (e) {
+          getState().log(
+            2,
+            `Error while handling a multinode msg: ${e.message}`
+          );
+        }
+      }
+    });
+  };
+};
+
+// helpful https://gist.github.com/jpoehls/2232358
+/**
  * @param {object} opts
  * @param {boolean} opts.disableMigrate
  * @param {boolean} [useClusterAdaptor = true]
+ * @param {any} multiNodeClient pg client for multi-node LISTEN/NOTIFY
  */
-const initMaster = async ({ disableMigrate }, useClusterAdaptor = true) => {
+const initMaster = async (
+  { disableMigrate },
+  useClusterAdaptor = true,
+  multiNodeClient
+) => {
   let sql_log;
   try {
     sql_log = await getConfig("log_sql");
@@ -62,13 +259,27 @@ const initMaster = async ({ disableMigrate }, useClusterAdaptor = true) => {
   // switch on sql logging
   if (sql_log) db.set_sql_logging(); // dont override cli flag
   // migrate database
-  if (!disableMigrate) await migrate(db.connectObj.default_schema, true);
+  if (!disableMigrate)
+    await db.runWithTenant(
+      db.connectObj.default_schema,
+      async () => await migrate(db.connectObj.default_schema, true)
+    );
   // load all plugins
-  await loadAllPlugins();
+  await Plugin.loadAllPlugins(true);
   // switch on sql logging - but it was initiated before???
   if (getState().getConfig("log_sql", false)) db.set_sql_logging();
+
+  // listen on node updates channel for this tenant
+  if (db.connectObj.multi_node) await getMultiNodeListener(multiNodeClient)();
+
   if (db.is_it_multi_tenant()) {
-    await init_multi_tenant(loadAllPlugins, disableMigrate);
+    const tenants = await getAllTenants();
+    await init_multi_tenant(
+      () => Plugin.loadAllPlugins(true),
+      disableMigrate,
+      tenants,
+      db.connectObj.multi_node ? getMultiNodeListener : null
+    );
   }
   if (useClusterAdaptor) setupPrimary();
 };
@@ -76,7 +287,6 @@ const initMaster = async ({ disableMigrate }, useClusterAdaptor = true) => {
 /**
  * @param {object} opts
  * @param {object} opts.tenant
- * @param {...*} opts.msg
  * @returns {void}
  */
 const workerDispatchMsg = ({ tenant, ...msg }) => {
@@ -84,22 +294,86 @@ const workerDispatchMsg = ({ tenant, ...msg }) => {
     db.runWithTenant(tenant, () => workerDispatchMsg(msg));
     return;
   }
+
   if (msg.refresh_plugin_cfg) {
     Plugin.findOne({ name: msg.refresh_plugin_cfg }).then((plugin) => {
-      if (plugin) loadPlugin(plugin);
+      if (plugin) Plugin.loadPlugin(plugin);
     });
   }
-  if (msg.refresh) getState()[`refresh_${msg.refresh}`](true);
+  if (!getState()) {
+    console.error("no State for tenant", tenant);
+    return;
+  }
+  if (msg.dynamic_update) {
+    getState().emitDynamicUpdate(
+      db.getTenantSchema(),
+      msg.dynamic_update,
+      msg.userIds,
+      true
+    );
+  }
+  if (msg.node_handle_msg) {
+    getState().deliverNodeHandle(
+      msg.node_handle_msg.id,
+      msg.node_handle_msg.payload
+    );
+  }
+  if (msg.real_time_collab_event) {
+    getState().emitCollabMessage(
+      db.getTenantSchema(),
+      msg.real_time_collab_event.type,
+      msg.real_time_collab_event.data,
+      msg.real_time_collab_event.viewname,
+      true
+    );
+  }
+  if (msg.real_time_chat_event) {
+    getState().emitRoom(...Object.values(msg.real_time_chat_event), {
+      noMultiNodePropagate: true,
+    });
+  }
+  if (msg.log_event) {
+    getState().emitLog(
+      db.getTenantSchema(),
+      msg.log_event.min_level,
+      msg.log_event.msg,
+      true
+    );
+  }
+  if (msg.restore_progress_event) {
+    getState().emitRestoreProgress(
+      db.getTenantSchema(),
+      msg.restore_progress_event.jobId,
+      msg.restore_progress_event.data,
+      true
+    );
+  }
+
+  if (msg.reload_plugins) {
+    Plugin.loadAllPlugins(cluster.isPrimary, true);
+  }
+  if (msg.refresh) {
+    if (msg.refresh === "ephemeral_config")
+      getState().refresh_ephemeral_config(msg.key, msg.value);
+    else getState()[`refresh_${msg.refresh}`](true);
+  }
   if (msg.createTenant) {
-    create_tenant(msg.createTenant, loadAllPlugins, "", true);
+    const tenant_template = getState().getConfig("tenant_template");
+    add_tenant(msg.createTenant);
+    create_tenant({
+      t: msg.createTenant,
+      plugin_loader: Plugin.loadAllPlugins,
+      noSignalOrDB: true,
+      tenant_template,
+    });
     db.runWithTenant(msg.createTenant, async () => {
       getState().refresh(true);
     });
   }
   if (msg.installPlugin) {
-    loadAndSaveNewPlugin(msg.installPlugin, msg.force, true);
+    Plugin.loadAndSaveNewPlugin(msg.installPlugin, msg.force, true);
   }
-  if (msg.restart_tenant) restart_tenant(loadAllPlugins);
+  if (msg.restart_tenant) restart_tenant(Plugin.loadAllPlugins);
   if (msg.removePlugin) getState().remove_plugin(msg.removePlugin, true);
 };
 
@@ -108,152 +382,416 @@ const workerDispatchMsg = ({ tenant, ...msg }) => {
  * @param {*} masterState
  * @param {object} opts
  * @param {string} opts.port
+ * @param {string} opts.host
  * @param {boolean} opts.watchReaper
  * @param {boolean} opts.disableScheduler
  * @param {number} opts.pid
  * @returns {function}
  */
-const onMessageFromWorker = (
-  masterState,
-  { port, watchReaper, disableScheduler, pid }
-) => (msg) => {
-  //console.log("worker msg", typeof msg, msg);
-  if (msg === "Start" && !masterState.started) {
-    masterState.started = true;
-    runScheduler({ port, watchReaper, disableScheduler });
-    require("./systemd")({ port });
-    return true;
-  } else if (msg === "RestartServer") {
-    process.exit(0);
-    return true;
-  } else if (msg.tenant || msg.createTenant) {
-    ///ie from saltcorn
-    //broadcast
-    Object.entries(cluster.workers).forEach(([wpid, w]) => {
-      if (wpid !== pid) w.send(msg);
-    });
-    workerDispatchMsg(msg); //also master
-    return true;
+const onMessageFromWorker =
+  (masterState, { port, pid, nodesDispatchMsg, scheduleHelper, isLeader }) =>
+  (msg) => {
+    //console.log("worker msg", typeof msg, msg);
+    if (msg === "Start" && !masterState.started) {
+      masterState.started = true;
+      if (isLeader) scheduleHelper.start();
+      if (db.connectObj.multi_node) {
+        startLeadershipMonitor({
+          scheduleHelper,
+          wasLeader: isLeader,
+        });
+      }
+      systemd({ port });
+      return true;
+    } else if (msg === "RestartServer") {
+      process.exit(0);
+      return true;
+    } else if (
+      (msg.dynamic_update ||
+        msg.real_time_collab_event ||
+        msg.real_time_chat_event ||
+        msg.log_event ||
+        msg.restore_progress_event) &&
+      nodesDispatchMsg
+    ) {
+      nodesDispatchMsg(msg);
+    } else if (msg.tenant || msg.createTenant) {
+      ///ie from saltcorn
+      //broadcast
+      Object.entries(cluster.workers).forEach(([wpid, w]) => {
+        //if it is plugin refresh, we need sender to get it as wll
+        if (wpid !== pid || msg?.refresh_plugin_cfg) w.send(msg);
+      });
+      workerDispatchMsg(msg); //also master
+      if (nodesDispatchMsg) nodesDispatchMsg(msg);
+      return true;
+    }
+  };
+
+const escapeSingleQuotes = (value) => value.replace(/'/g, "''");
+
+// read 'store_entries.json' into a config
+// on pre-install time no db connection exists, that's why we nee a file
+// but for the server it's better to have a config instead of reading a file each time
+const initOfflineStoreCfg = async () => {
+  const rootState = getState();
+  try {
+    if (!Plugin.local_store_entries_exists) {
+      await rootState.setConfig("pre_installed_module_infos", []);
+      return;
+    }
+    const entries = await Plugin.read_local_store_entries();
+    await rootState.setConfig("pre_installed_module_infos", entries);
+  } catch (e) {
+    console.log(
+      `Unable to read pre_installed_module_infos: ${
+        e.message ? e.message : "Unknown error"
+      }`
+    );
+    await rootState.setConfig("pre_installed_module_infos", []);
   }
 };
 
-module.exports =
-  /**
-   * @function
-   * @name "module.exports function"
-   * @param {object} [opts = {}]
-   * @param {number} [opts.port = 3000]
-   * @param {boolean} opts.watchReaper
-   * @param {boolean} opts.disableScheduler
-   * @param {number} opts.defaultNCPUs
-   * @param {...*} opts.appargs
-   * @returns {Promise<void>}
-   */
-  async ({
-    port = 3000,
-    watchReaper,
-    disableScheduler,
-    defaultNCPUs,
-    ...appargs
-  } = {}) => {
-    const useNCpus = process.env.SALTCORN_NWORKERS
-      ? +process.env.SALTCORN_NWORKERS
-      : defaultNCPUs;
-
-    const letsEncrypt = await getConfig("letsencrypt", false);
-    const masterState = {
-      started: false,
-      listeningTo: new Set([]),
-    };
-
-    const addWorker = (worker) => {
-      worker.on(
-        "message",
-        onMessageFromWorker(masterState, {
-          port,
-          watchReaper,
-          disableScheduler,
-          pid: worker.process.pid,
-        })
-      );
-    };
-
-    if (port === 80 && letsEncrypt) {
-      const admin_users = await User.find({ role_id: 1 }, { orderBy: "id" });
-      const file_store = db.connectObj.file_store;
-      const Greenlock = require("greenlock");
-      const greenlock = Greenlock.create({
-        packageRoot: __dirname,
-        configDir: path.join(file_store, "greenlock.d"),
-        maintainerEmail: admin_users[0].email,
-      });
-      const certs = await greenlock._find({});
-      console.log("Certificates:", certs);
-
-      if (certs && certs.length > 0) {
-        const app = await getApp(appargs);
-        const timeout = +getState().getConfig("timeout", 120);
-        const initMasterListeners = () => {
-          Object.entries(cluster.workers).forEach(([id, w]) => {
-            if (!masterState.listeningTo.has(id)) {
-              addWorker(w);
-              masterState.listeningTo.add(id);
-            }
-          });
-          if (masterState.listeningTo.size < useNCpus)
-            setTimeout(initMasterListeners, 250);
-        };
-        require("greenlock-express")
-          .init({
-            packageRoot: __dirname,
-            configDir: path.join(file_store, "greenlock.d"),
-            maintainerEmail: admin_users[0].email,
-            cluster: true,
-            workers: useNCpus,
-          })
-          .ready((glx) => {
-            const httpsServer = glx.httpsServer();
-            setupSocket(httpsServer);
-            httpsServer.setTimeout(timeout * 1000);
-            process.on("message", workerDispatchMsg);
-            glx.serveApp(app);
-            process.send && process.send("Start");
-          })
-          .master(() => {
-            initMaster(appargs).then(initMasterListeners);
-          });
-
-        return; // none of stuff below will execute
-      }
-    }
-    // No greenlock!
-
-    if (cluster.isMaster) {
-      const forkAnyWorkers = useNCpus > 1 && process.platform !== "win32";
-      await initMaster(appargs, forkAnyWorkers);
-
-      if (forkAnyWorkers) {
-        for (let i = 0; i < useNCpus; i++) addWorker(cluster.fork());
-
-        cluster.on("exit", (worker, code, signal) => {
-          console.log(`worker ${worker.process.pid} died`);
-          addWorker(cluster.fork());
-        });
-      } else {
-        await nonGreenlockWorkerSetup(appargs, port);
-      }
-      Trigger.emitEvent("Startup");
-    } else {
-      await nonGreenlockWorkerSetup(appargs, port);
-    }
+/**
+ * returns a function that checks if current node is leader
+ * uses a dedicated pg connection that holds an advisory lock
+ */
+const getIsLeaderFn = async () => {
+  const electLeaderConn = await db.getClient();
+  // leader election uses postgres advisory locks; other backends (sqlite
+  // embedded, or those without advisory locks) are always the leader
+  const usesAdvisoryLock = db.driverName === "postgres";
+  return async () => {
+    if (!usesAdvisoryLock) return true;
+    const lockId = 11565;
+    const result = await electLeaderConn.query(
+      "SELECT pg_try_advisory_lock($1) AS is_leader",
+      [lockId]
+    );
+    if (result.rows[0].is_leader) return true;
+    else return false;
   };
+};
+
+/**
+ * check periodically if the current node is leader and start/stop scheduler accordingly
+ * @param options - Options object
+ * @param options.scheduleHelper - Helper with start/stop and checkIsLeader function.
+ * @param options.wasLeader - flag if it was previously the leader.
+ * @param options.intervalMs - Monitor interval, Defaults to `5000`.
+ */
+const startLeadershipMonitor = ({
+  scheduleHelper,
+  wasLeader,
+  intervalMs = 5000,
+}) => {
+  let schedulerStarted = wasLeader;
+  setInterval(async () => {
+    try {
+      const isLeader = await scheduleHelper.isLeaderFn();
+      if (isLeader && !schedulerStarted) {
+        scheduleHelper.start();
+        schedulerStarted = true;
+      } else if (!isLeader && schedulerStarted) {
+        scheduleHelper.stop();
+        schedulerStarted = false;
+      }
+    } catch (e) {
+      console.log(`Error checking leadership: ${e.message}`);
+    }
+  }, intervalMs);
+};
+
+export default /**
+ * @function
+ * @name "module.exports function"
+ * @param {object} [opts = {}]
+ * @param {number} [opts.port = 3000]
+ * @param {host} [opts.host]
+ * @param {boolean} opts.watchReaper
+ * @param {boolean} opts.disableScheduler
+ * @param {number} opts.defaultNCPUs
+ * @param {boolean} opts.dev
+ * @param {...*} opts.appargs
+ * @returns {Promise<void>}
+ */
+async ({
+  port = 3000,
+  host,
+  watchReaper,
+  disableScheduler,
+  defaultNCPUs,
+  dev,
+  ...appargs
+} = {}) => {
+  if (cluster.isPrimary) {
+    ensureJwtSecret();
+    await ensurePluginsFolder();
+    await ensureNotificationSubscriptions();
+
+    // reload plugins on SIGHUP
+    process.on("SIGHUP", async () => {
+      getState().log(
+        4,
+        "SIGHUP received: reloading plugins and state for all tenants"
+      );
+      await Plugin.loadAllPlugins(true, true);
+      await getState().refresh_plugins(true);
+      Object.entries(cluster.workers || {}).forEach(([wpid, w]) => {
+        w.send({ reload_plugins: true });
+      });
+      if (db.is_it_multi_tenant()) {
+        for (const tenant of await getAllTenants()) {
+          await db.runWithTenant(tenant, async () => {
+            await Plugin.loadAllPlugins(true, true);
+            await getState().refresh_plugins(true);
+            Object.entries(cluster.workers || {}).forEach(([wpid, w]) => {
+              w.send({ tenant, reload_plugins: true });
+            });
+          });
+        }
+      }
+    });
+  }
+  process.on("unhandledRejection", (reason, p) => {
+    console.error(reason, "Unhandled Rejection at Promise");
+  });
+
+  if (dev && cluster.isMaster) {
+    listenForChanges(getRelevantPackages(), await getPluginDirectories());
+  }
+  const useNCpus = process.env.SALTCORN_NWORKERS
+    ? +process.env.SALTCORN_NWORKERS
+    : defaultNCPUs;
+
+  const letsEncrypt = await getConfig("letsencrypt", false);
+  const pruneSessionInterval = +(await getConfig(
+    "prune_session_interval",
+    900
+  ));
+  const masterState = {
+    started: false,
+    listeningTo: new Set([]),
+  };
+
+  let nodesDispatchMsg = null;
+  let multiNodeClient = null;
+  let isLeaderFn = null;
+  let isLeader = true;
+  if (db.connectObj.multi_node) {
+    multiNodeClient = await db.getClient();
+    if (cluster.isMaster) {
+      isLeaderFn = await getIsLeaderFn();
+      isLeader = await isLeaderFn();
+    }
+    nodesDispatchMsg = async ({ tenant, ...msg }) => {
+      if (tenant) {
+        db.runWithTenant(tenant, () => nodesDispatchMsg(msg));
+        return;
+      }
+      if (
+        msg.restart_tenant ||
+        msg.installPlugin ||
+        msg.removePlugin ||
+        msg.refresh_plugin_cfg ||
+        msg.dynamic_update ||
+        msg.real_time_collab_event ||
+        msg.real_time_chat_event ||
+        msg.log_event ||
+        msg.restore_progress_event ||
+        msg.node_handle_msg ||
+        (msg.refresh && msg.refresh !== "ephemeral_config")
+      ) {
+        const payload = escapeSingleQuotes(JSON.stringify(msg));
+        const payloadBytes = Buffer.byteLength(payload, "utf8");
+        if (payloadBytes < 8000) {
+          await multiNodeClient.query(
+            `NOTIFY ${db.getTenantSchema()}_events, '${payload}'`
+          );
+        } else {
+          getState().log(
+            2,
+            `Not sending multinode message, too large (${payloadBytes} bytes)`
+          );
+        }
+      }
+    };
+  }
+
+  const scheduleHelper = {
+    stopScheduler: false,
+    start: () => {
+      scheduleHelper.stopScheduler = false;
+      runScheduler({
+        stop_when: () => scheduleHelper.stopScheduler,
+        port,
+        host,
+        watchReaper,
+        disableScheduler,
+        eachTenant,
+        auto_backup_now,
+        take_snapshot,
+      });
+    },
+    stop: () => {
+      scheduleHelper.stopScheduler = true;
+    },
+    isLeaderFn,
+  };
+
+  const addWorker = (worker) => {
+    worker.on(
+      "message",
+      onMessageFromWorker(masterState, {
+        port,
+        pid: worker.process.pid,
+        nodesDispatchMsg,
+        scheduleHelper,
+        isLeader,
+      })
+    );
+  };
+  await initOfflineStoreCfg();
+
+  if (port === 80 && letsEncrypt) {
+    const admin_users = await User.find({ role_id: 1 }, { orderBy: "id" });
+    const file_store = db.connectObj.file_store;
+    const Greenlock = require("greenlock");
+    const greenlock = Greenlock.create({
+      packageRoot: path.join(__dirname, ".."),
+      configDir: path.join(file_store, "greenlock.d"),
+      maintainerEmail: admin_users[0].email,
+    });
+    const certs = await greenlock._find({});
+    console.log("Certificates:", certs);
+
+    if (certs && certs.length > 0) {
+      const app = await getApp(appargs);
+      const timeout = +getState().getConfig("timeout", 120);
+      const initMasterListeners = () => {
+        Object.entries(cluster.workers).forEach(([id, w]) => {
+          if (!masterState.listeningTo.has(id)) {
+            addWorker(w);
+            masterState.listeningTo.add(id);
+          }
+        });
+        getState().sendMessageToWorkers = (msg) => {
+          if (isSocketEventMsg(msg)) {
+            // already emitted locally, only other nodes need it
+            if (nodesDispatchMsg)
+              nodesDispatchMsg(msg).catch((e) => {
+                console.log("Error sending multinode message", e.message);
+              });
+            return;
+          }
+          Object.entries(cluster.workers).forEach(([wpid, w]) => {
+            w.send(msg);
+          });
+          workerDispatchMsg(msg); //also master
+          if (nodesDispatchMsg && useNCpus === 1)
+            nodesDispatchMsg(msg).catch((e) => {
+              console.log("Error sending multinode message", e.message);
+            });
+        };
+
+        if (masterState.listeningTo.size < useNCpus)
+          setTimeout(initMasterListeners, 250);
+      };
+      require("greenlock-express")
+        .init({
+          packageRoot: path.join(__dirname, ".."),
+          configDir: path.join(file_store, "greenlock.d"),
+          maintainerEmail: admin_users[0].email,
+          cluster: true,
+          workers: useNCpus,
+        })
+        .ready((glx) => {
+          const httpsServer = glx.httpsServer();
+          setupSocket(
+            appargs?.subdomainOffset,
+            pruneSessionInterval,
+            httpsServer
+          );
+          httpsServer.setTimeout(timeout * 1000);
+          process.on("message", workerDispatchMsg);
+          glx.serveApp(app);
+          getState().processSend("Start");
+        })
+        .master(() => {
+          initMaster(appargs, true, multiNodeClient).then(() => {
+            forwardPrimarySocketEmits();
+            initMasterListeners();
+          });
+        });
+
+      return; // none of stuff below will execute
+    }
+  }
+  // No greenlock!
+
+  if (cluster.isMaster) {
+    const forkAnyWorkers = useNCpus > 1 && process.platform !== "win32";
+    await initMaster(appargs, forkAnyWorkers, multiNodeClient);
+
+    if (forkAnyWorkers) {
+      for (let i = 0; i < useNCpus; i++) addWorker(cluster.fork());
+      forwardPrimarySocketEmits();
+      getState().sendMessageToWorkers = (msg) => {
+        if (isSocketEventMsg(msg)) {
+          // already emitted locally, only other nodes need it
+          if (nodesDispatchMsg)
+            nodesDispatchMsg(msg).catch((e) => {
+              console.log("Error sending multinode message", e.message);
+            });
+          return;
+        }
+        Object.entries(cluster.workers).forEach(([wpid, w]) => {
+          w.send(msg);
+        });
+        workerDispatchMsg(msg); //also master
+      };
+
+      cluster.on("exit", (worker, code, signal) => {
+        console.log(`worker ${worker.process.pid} died`);
+        addWorker(cluster.fork());
+      });
+    } else {
+      getState().sendMessageToWorkers = (msg) => {
+        if (
+          !msg.dynamic_update &&
+          !msg.real_time_collab_event &&
+          !msg.real_time_chat_event &&
+          !msg.log_event &&
+          !msg.restore_progress_event
+        )
+          workerDispatchMsg(msg); //also master
+        if (nodesDispatchMsg)
+          nodesDispatchMsg(msg).catch((e) => {
+            console.log("Error sending multinode message", e.message);
+          });
+      };
+      await nonGreenlockWorkerSetup(appargs, port, host);
+      if (isLeader) scheduleHelper.start();
+      if (db.connectObj.multi_node) {
+        startLeadershipMonitor({
+          scheduleHelper,
+          wasLeader: isLeader,
+        });
+      }
+      systemd({ port });
+    }
+    Trigger.emitEvent("Startup");
+  } else {
+    await nonGreenlockWorkerSetup(appargs, port, host);
+  }
+};
 
 /**
  * @param {*} appargs
  * @param {*} port
  * @returns {Promise<void>}
  */
-const nonGreenlockWorkerSetup = async (appargs, port) => {
+const nonGreenlockWorkerSetup = async (appargs, port, host) => {
   process.send && process.on("message", workerDispatchMsg);
 
   const app = await getApp(appargs);
@@ -261,8 +799,15 @@ const nonGreenlockWorkerSetup = async (appargs, port) => {
   const cert = getState().getConfig("custom_ssl_certificate", "");
   const key = getState().getConfig("custom_ssl_private_key", "");
   const timeout = +getState().getConfig("timeout", 120);
+  const pruneSessionInterval = +(await getState().getConfig(
+    "prune_session_interval",
+    900
+  ));
   // Server with http on port 80 / https on 443
   // todo  resolve hardcode
+
+  const listenArgs = { port };
+  if (host) listenArgs.host = host;
   if (port === 80 && cert && key) {
     const https = require("https");
     const http = require("http");
@@ -271,37 +816,56 @@ const nonGreenlockWorkerSetup = async (appargs, port) => {
     // todo timeout to config
     httpServer.setTimeout(timeout * 1000);
     httpsServer.setTimeout(timeout * 1000);
-    setupSocket(httpServer, httpsServer);
-    httpServer.listen(port, () => {
+    setupSocket(
+      appargs?.subdomainOffset,
+      pruneSessionInterval,
+      httpServer,
+      httpsServer
+    );
+    httpServer.listen(listenArgs, () => {
       console.log("HTTP Server running on port 80");
     });
 
     // todo port to config
-    httpsServer.listen(443, () => {
+    const httpsListenArgs = { ...listenArgs, port: 443 };
+    httpsServer.listen(httpsListenArgs, () => {
       console.log("HTTPS Server running on port 443");
     });
   } else {
     // server with http only
     const http = require("http");
     const httpServer = http.createServer(app);
-    setupSocket(httpServer);
+    setupSocket(appargs?.subdomainOffset, pruneSessionInterval, httpServer);
 
     // todo timeout to config
     // todo refer in doc to httpserver doc
     // todo there can be added other parameters for httpserver
     httpServer.setTimeout(timeout * 1000);
-    httpServer.listen(port, () => {
-      console.log(`Saltcorn listening on http://localhost:${port}/`);
+    httpServer.listen(listenArgs, () => {
+      console.log(
+        `Saltcorn listening on http://${host || `localhost`}:${port}/`
+      );
     });
   }
-  process.send && process.send("Start");
+  getState().processSend("Start");
+};
+
+const tenantFromSocket = (socket, hostPartOffset) => {
+  if (!db.is_it_multi_tenant()) return db.connectObj.default_schema;
+  const header = socket.request.headers.host;
+  const hostOnly = header?.split(":")[0];
+  if (hostOnly) {
+    const tenant = get_other_domain_tenant(hostOnly);
+    if (tenant) return tenant;
+  }
+  return get_tenant_from_req(socket.request, hostPartOffset);
 };
 
 /**
  *
  * @param  {...*} servers
  */
-const setupSocket = (...servers) => {
+const setupSocket = (subdomainOffset, pruneSessionInterval, ...servers) => {
   // https://socket.io/docs/v4/middlewares/
   const wrap = (middleware) => (socket, next) =>
     middleware(socket.request, {}, next);
@@ -311,24 +875,377 @@ const setupSocket = (...servers) => {
     io.attach(server);
   }
 
-  io.use(wrap(setTenant));
-  io.use(wrap(getSessionStore()));
-  io.use(wrap(passport.initialize()));
-  io.use(wrap(passport.session()));
+  const passportInit = passport.initialize();
+  const sessionStore = getSessionStore(pruneSessionInterval);
+  const setupNamespace = (namespace) => {
+    //io.of(namespace).use(wrap(setTenant));
+    io.of(namespace).use(wrap(sessionStore));
+    io.of(namespace).use(wrap(passportInit));
+    io.of(namespace).use(wrap(passport.authenticate(["session"])));
+    // drop a session user minted under a different tenant than this host
+    // resolves to, same drift guard as the HTTP app
+    io.of(namespace).use((socket, next) => {
+      const user = socket.request.user;
+      if (user && user.tenant !== undefined) {
+        const ten =
+          tenantFromSocket(socket, subdomainOffset) ||
+          db.connectObj.default_schema;
+        if (user.tenant !== ten) socket.request.user = undefined;
+      }
+      next();
+    });
+  };
+  setupNamespace("/");
+  setupNamespace("/datastream");
   if (process.send && !cluster.isMaster) io.adapter(createAdapter());
-  getState().setRoomEmitter((viewname, room_id, msg) => {
-    io.to(`${viewname}_${room_id}`).emit("message", msg);
+  getState().setRoomEmitter((tenant, viewname, room_id, msg) => {
+    io.of("/").to(`${tenant}_${viewname}_${room_id}`).emit("message", msg);
   });
-  io.on("connection", (socket) => {
+
+  getState().setLogEmitter((tenant, level, msg) => {
+    const time = new Date().valueOf();
+    io.of("/")
+      .to(`_logs_${tenant}_`)
+      .emit("log_msg", { text: msg, time, level });
+  });
+
+  // backup-restore progress, pre-login (create first user) so no auth check;
+  // the jobId (an unguessable uuid, known only to the browser that started
+  // the restore) is the room name and doubles as the access token
+  getState().setRestoreEmitter((tenant, jobId, data) => {
+    io.of("/").to(`_restore_${jobId}_`).emit("restore_progress", data);
+  });
+
+  // Real-time collaboration emitter (tied to views)
+  getState().setCollabEmitter((tenant, type, data, viewname) => {
+    io.of("/").to(`_${tenant}_collab_room_${viewname}_`).emit(type, data);
+  });
+
+  // dynamic updates emitter (for run_js_actions)
+  getState().setDynamicUpdateEmitter((tenant, data, userIds) => {
+    if (userIds === null) {
+      // explicit public-only; data may carry page_load_tag for client-side filtering
+      io.of("/")
+        .to(`_${tenant}_public_dynamic_update_room`)
+        .emit("dynamic_update", data);
+    } else if (Array.isArray(userIds)) {
+      for (const userId of userIds) {
+        io.of("/")
+          .to(`_${tenant}:${userId}_dynamic_update_room`)
+          .emit("dynamic_update", data);
+      }
+    } else if (userIds === undefined) {
+      // broadcast to all authenticated users in this tenant
+      io.of("/")
+        .to(`_${tenant}_dynamic_update_room`)
+        .emit("dynamic_update", data);
+    } else {
+      getState().log(
+        1,
+        `setDynamicUpdateEmitter: unexpected userIds value: ${JSON.stringify(
+          userIds
+        )}`
+      );
+    }
+  });
+
+  io.of("/").on("connection", (socket) => {
     socket.on("join_room", ([viewname, room_id]) => {
-      const view = View.findOne({ name: viewname });
-      if (view.viewtemplateObj.authorize_join) {
-        view.viewtemplateObj
-          .authorize_join(view.configuration, room_id, socket.request.user)
-          .then((authorized) => {
-            if (authorized) socket.join(`${viewname}_${room_id}`);
+      const ten = tenantFromSocket(socket, subdomainOffset) || "public";
+      const f = () => {
+        try {
+          const view = View.findOne({ name: viewname });
+          if (view.viewtemplateObj.authorize_join) {
+            view.viewtemplateObj
+              .authorize_join(view, room_id, socket.request.user)
+              .then((authorized) => {
+                if (authorized) socket.join(`${ten}_${viewname}_${room_id}`);
+              });
+          } else socket.join(`${ten}_${viewname}_${room_id}`);
+        } catch (err) {
+          const state = getState();
+          if (state) state.log(1, `Socket join_room error: ${err.stack}`);
+          else console.error("Socket join_room error:", err);
+        }
+      };
+      if (ten && ten !== "public") db.runWithTenant(ten, f);
+      else f();
+    });
+
+    // no auth check: this is used pre-login (restoring a backup while
+    // creating the first user), and the jobId - an unguessable uuid shown
+    // only to the browser that started the job - is itself the capability
+    socket.on("join_restore_room", (jobId, callback) => {
+      if (typeof jobId === "string" && /^[0-9a-f-]{36}$/i.test(jobId)) {
+        const room = `_restore_${jobId}_`;
+        socket.join(room);
+        if (typeof callback === "function") callback({ status: "ok" });
+        // let the client confirm messages actually arrive, not just that
+        // the handshake succeeded (a proxy can allow one but not the other)
+        setTimeout(() => {
+          io.of("/").to(room).emit("test_conn_msg", {});
+        }, 1000);
+      } else if (typeof callback === "function") {
+        callback({ status: "error", msg: "invalid job id" });
+      }
+    });
+
+    socket.on("join_log_room", async (callback) => {
+      const tenant = tenantFromSocket(socket, subdomainOffset) || "public";
+      const f = async () => {
+        try {
+          const user = socket.request.user;
+          if (!user || user.role_id !== 1) throw new Error("Not authorized");
+          else {
+            socket.join(`_logs_${tenant}_`);
+            const socketIds = await getState().getConfig(
+              "joined_log_socket_ids"
+            );
+            socketIds.push(socket.id);
+            await getState().setConfig("joined_log_socket_ids", [...socketIds]);
+            callback({ status: "ok" });
+            setTimeout(() => {
+              io.of("/")
+                .to(`_logs_${tenant}_`)
+                .emit("test_conn_msg", { text: "test message" });
+            }, 1000);
+          }
+        } catch (err) {
+          getState().log(1, `Socket join_logs stream: ${err.stack}`);
+          callback({ status: "error", msg: err.message || "unknown error" });
+        }
+      };
+      if (tenant && tenant !== "public") await db.runWithTenant(tenant, f);
+      else await f();
+    });
+
+    // or join the room more generally and later register views ??
+    socket.on("join_collab_room", async (viewname, callback) => {
+      const tenant = tenantFromSocket(socket, subdomainOffset) || "public";
+      const f = async () => {
+        try {
+          const view = View.findOne({ name: viewname });
+          if (!view) throw new Error(`View ${viewname} not found`);
+          const user = socket.request.user;
+          const role_id = user ? user.role_id : 100;
+          if (view.min_role < role_id)
+            throw new Error("Not authorized to join collaboration room");
+          const roomName = `_${tenant}_collab_room_${viewname}_`;
+          if (!socket.rooms.has(roomName)) {
+            socket.join(roomName);
+            if (typeof callback === "function") callback({ status: "ok" });
+            const socketIds = await getState().getConfig(
+              "joined_real_time_socket_ids",
+              []
+            );
+            socketIds.push(socket.id);
+            await getState().setConfig("joined_real_time_socket_ids", [
+              ...new Set(socketIds),
+            ]);
+          } else if (typeof callback === "function")
+            callback({ status: "already_joined" });
+        } catch (err) {
+          const state = getState();
+          if (state) state.log(1, `Socket join_collab_room: ${err.stack}`);
+          else console.error("Socket join_collab_room:", err);
+          if (typeof callback === "function")
+            callback({ status: "error", msg: err.message || "unknown error" });
+        }
+      };
+      if (tenant && tenant !== "public") await db.runWithTenant(tenant, f);
+      else await f();
+    });
+
+    // join_dynamic_update_room for events emitted from run_js_actions
+    socket.on("join_dynamic_update_room", async (callback) => {
+      const tenant = tenantFromSocket(socket, subdomainOffset) || "public";
+      const f = async () => {
+        try {
+          const enabled = getState().getConfig("enable_dynamic_updates", true);
+          if (!enabled) throw new Error("Dynamic updates are not enabled");
+          const user = socket.request.user;
+          if (user) {
+            socket.join(`_${tenant}:${user.id}_dynamic_update_room`);
+            socket.join(`_${tenant}_dynamic_update_room`);
+          } else {
+            socket.join(`_${tenant}_public_dynamic_update_room`);
+          }
+          const socketIds = await getState().getConfig(
+            "joined_dynamic_update_socket_ids",
+            []
+          );
+          socketIds.push(socket.id);
+          await getState().setConfig("joined_dynamic_update_socket_ids", [
+            ...new Set(socketIds),
+          ]);
+          if (typeof callback === "function") callback({ status: "ok" });
+        } catch (err) {
+          const state = getState();
+          if (state)
+            state.log(1, `Socket join_dynamic_update_room: ${err.stack}`);
+          else console.error("Socket join_dynamic_update_room: ", err);
+
+          if (typeof callback === "function")
+            callback({ status: "error", msg: err.message || "unknown error" });
+        }
+      };
+      if (tenant && tenant !== "public") await db.runWithTenant(tenant, f);
+      else await f();
+    });
+
+    socket.on("disconnect", async () => {
+      const tenant = tenantFromSocket(socket, subdomainOffset) || "public";
+      const f = async () => {
+        const state = getState();
+        if (state) {
+          const socketIds = state.getConfig("joined_log_socket_ids");
+          const newSocketIds = socketIds.filter((id) => id !== socket.id);
+          await state.setConfig("joined_log_socket_ids", newSocketIds);
+
+          const dynamicSocketIds = state.getConfig(
+            "joined_dynamic_update_socket_ids",
+            []
+          );
+          const newDynamicSocketIds = dynamicSocketIds.filter(
+            (id) => id !== socket.id
+          );
+          await state.setConfig(
+            "joined_dynamic_update_socket_ids",
+            newDynamicSocketIds
+          );
+
+          const realTimeSocketIds = state.getConfig(
+            "joined_real_time_socket_ids",
+            []
+          );
+          const newRealTimeSocketIds = realTimeSocketIds.filter(
+            (id) => id !== socket.id
+          );
+          await state.setConfig(
+            "joined_real_time_socket_ids",
+            newRealTimeSocketIds
+          );
+        } else {
+          console.error("No state found in socket disconnect");
+          console.error("The current tenantSchema is:", db.getTenantSchema());
+          console.error("The current tenant from request is:", tenant);
+          console.error("node version:", process.version);
+        }
+      };
+      if (tenant && tenant !== "public") await db.runWithTenant(tenant, f);
+      else await f();
+    });
+  });
+
+  io.of("/datastream").on("connection", (socket) => {
+    let dataStream = null;
+    let dataTarget = null;
+    socket.on(
+      "open_data_stream",
+      async ([viewName, id, fieldName, fieldView, targetOpts], callback) => {
+        const tenant = tenantFromSocket(socket, subdomainOffset) || "public";
+        const f = async () => {
+          try {
+            const user = socket.request.user;
+            const view = View.findOne({ name: viewName });
+            if (view.viewtemplateObj.authorizeDataStream) {
+              const authorized = await view.viewtemplateObj.authorizeDataStream(
+                view,
+                id,
+                fieldName,
+                user,
+                targetOpts
+              );
+              if (!authorized) throw new Error("Not authorized");
+            }
+            const { stream, target } = await view.openDataStream(
+              id,
+              fieldName,
+              fieldView,
+              user,
+              targetOpts
+            );
+            dataStream = stream;
+            dataTarget = target;
+            getState().log(
+              5,
+              `opened data stram to: ${JSON.stringify(dataTarget)}`
+            );
+            callback({ status: "ok", target });
+          } catch (err) {
+            getState().log(
+              1,
+              `Socket open_data_stream: ${err.message || "unknown error"}`
+            );
+            callback({ status: "error", msg: err.message || "unknown error" });
+          }
+        };
+        if (tenant && tenant !== "public") await db.runWithTenant(tenant, f);
+        else await f();
+      }
+    );
+    socket.on("write_to_stream", async (data, callback) => {
+      if (!dataStream) {
+        getState().log(1, "Socket write_to_stream: No stream available");
+        callback({ status: "error", msg: "No stream available" });
+      } else
+        dataStream.write(data, (err) => {
+          if (err) {
+            getState().log(1, "Socket write_to_stream: No stream available");
+            callback({ status: "error", msg: err.message || "unknown error" });
+          } else callback({ status: "ok" });
+        });
+    });
+
+    socket.on("close_data_stream", async (callback) => {
+      if (!dataStream) {
+        getState().log(1, "Socket close_data_stream: No stream available");
+        callback({ status: "error", msg: "No stream available" });
+      } else {
+        dataStream.close((err) => {
+          if (err) {
+            getState().log(
+              1,
+              `Socket close_data_stream: ${err.message || "unknown error"}`
+            );
+            callback({ status: "error", msg: err.message || "unknown error" });
+          } else {
+            getState().log(
+              5,
+              `closed data stram of: ${JSON.stringify(dataTarget)}`
+            );
+            callback({ status: "ok" });
+            dataStream = null;
+          }
+        });
+      }
+    });
+
+    socket.on("disconnect", async () => {
+      const tenant = tenantFromSocket(socket, subdomainOffset) || "public";
+      const f = async () => {
+        if (dataStream)
+          dataStream.close((err) => {
+            if (err) {
+              getState().log(
+                1,
+                `Socket disconnect close_data_stream: ${
+                  err.message || "unknown error"
+                }`
+              );
+            } else {
+              getState().log(
+                5,
+                `closed data stram of: ${JSON.stringify(dataTarget)}`
+              );
+              dataStream = null;
+            }
           });
-      } else socket.join(`${viewname}_${room_id}`);
+      };
+      if (tenant && tenant !== "public") await db.runWithTenant(tenant, f);
+      else await f();
     });
   });
 };
+
+export { setupSocket };

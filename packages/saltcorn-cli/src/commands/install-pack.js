@@ -2,8 +2,8 @@
  * @category saltcorn-cli
  * @module commands/install-pack
  */
-const { Command, flags } = require("@oclif/command");
-const { maybe_as_tenant } = require("../common");
+const { Command, Flags } = require("@oclif/core");
+const { maybe_as_tenant_in_transaction } = require("../common");
 const fs = require("fs");
 
 /**
@@ -16,12 +16,12 @@ class InstallPackCommand extends Command {
    * @returns {Promise<void>}
    */
   async run() {
-    const { flags } = this.parse(InstallPackCommand);
+    const { flags } = await this.parse(InstallPackCommand);
     const {
       fetch_pack_by_name,
       install_pack,
-    } = require("@saltcorn/data/models/pack");
-    const load_plugins = require("@saltcorn/server/load_plugins");
+    } = require("@saltcorn/admin-models/models/pack");
+    const Plugin = require("@saltcorn/data/models/plugin");
 
     if (!flags.name && !flags.file) {
       console.error(
@@ -29,12 +29,13 @@ class InstallPackCommand extends Command {
       );
       this.exit(1);
     }
-    const { loadAllPlugins } = require("@saltcorn/server/load_plugins");
     const { init_multi_tenant } = require("@saltcorn/data/db/state");
-    await loadAllPlugins();
-    await init_multi_tenant(loadAllPlugins);
+    const { getAllTenants } = require("@saltcorn/admin-models/models/tenant");
+    await Plugin.loadAllPlugins();
+    const tenants = await getAllTenants();
+    await init_multi_tenant(Plugin.loadAllPlugins, undefined, tenants);
 
-    await maybe_as_tenant(flags.tenant, async () => {
+    await maybe_as_tenant_in_transaction(flags.tenant, async () => {
       if (flags.name) {
         const pack = await fetch_pack_by_name(flags.name);
         if (!pack) {
@@ -42,7 +43,7 @@ class InstallPackCommand extends Command {
           this.exit(1);
         }
         await install_pack(pack.pack, flags.name, (p) =>
-          load_plugins.loadAndSaveNewPlugin(p)
+          Plugin.loadAndSaveNewPlugin(p)
         );
       } else if (flags.file) {
         let pack;
@@ -53,7 +54,7 @@ class InstallPackCommand extends Command {
           this.exit(1);
         }
         await install_pack(pack, undefined, (p) =>
-          load_plugins.loadAndSaveNewPlugin(p)
+          Plugin.loadAndSaveNewPlugin(p)
         );
       }
     });
@@ -64,21 +65,21 @@ class InstallPackCommand extends Command {
 /**
  * @type {string}
  */
-InstallPackCommand.description = `Install a pack`;
+InstallPackCommand.description = `Install a pack or restore a snapshot`;
 
 /**
  * @type {object}
  */
 InstallPackCommand.flags = {
-  tenant: flags.string({
+  tenant: Flags.string({
     char: "t",
     description: "tenant",
   }),
-  name: flags.string({
+  name: Flags.string({
     char: "n",
     description: "Pack name in store",
   }),
-  file: flags.string({
+  file: Flags.string({
     char: "f",
     description: "File with pack JSON",
   }),

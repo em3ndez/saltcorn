@@ -1,19 +1,23 @@
-const request = require("supertest");
-const getApp = require("../app");
-const Field = require("@saltcorn/data/models/field");
-const Table = require("@saltcorn/data/models/table");
+import { request as request } from "../auth/testhelp.js";
+import getApp from "../app.js";
+import Field from "@saltcorn/data/models/field";
+import Table from "@saltcorn/data/models/table";
+import View from "@saltcorn/data/models/view";
+import User from "@saltcorn/data/models/user";
 
-const {
+import {
   getStaffLoginCookie,
   getAdminLoginCookie,
+  getUserLoginCookie,
   itShouldRedirectUnauthToLogin,
   toInclude,
+  toBeTrue,
   toNotInclude,
   toRedirect,
   resetToFixtures,
   respondJsonWith,
-} = require("../auth/testhelp");
-const db = require("@saltcorn/data/db");
+} from "../auth/testhelp.js";
+import db from "@saltcorn/data/db";
 
 afterAll(db.close);
 
@@ -44,7 +48,7 @@ describe("Field Endpoints", () => {
 
   it("should post new int field", async () => {
     const loginCookie = await getAdminLoginCookie();
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
 
     const ctx = encodeURIComponent(JSON.stringify({ table_id: table.id }));
     const app = await getApp({ disableCsrf: true });
@@ -61,7 +65,7 @@ describe("Field Endpoints", () => {
 
   it("should post new int field with attributes", async () => {
     const loginCookie = await getAdminLoginCookie();
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
 
     const ctx = encodeURIComponent(
       JSON.stringify({
@@ -100,8 +104,8 @@ describe("Field Endpoints", () => {
     await request(app)
       .post("/field/")
       .send("stepName=Basic properties")
-      .send("name=Publisher")
-      .send("label=Publisher")
+      .send("name=Editor")
+      .send("label=Editor")
       .send("type=String")
       .send("contextEnc=" + ctx)
       .set("Cookie", loginCookie)
@@ -141,6 +145,7 @@ describe("Field Endpoints", () => {
       .send("stepName=Summary")
       .send("contextEnc=" + ctx)
       .send("summary_field=pages")
+      .send("on_delete=Fail")
       .set("Cookie", loginCookie)
       .expect(toRedirect("/table/2"));
   });
@@ -227,7 +232,7 @@ describe("Field Endpoints", () => {
 
   it("should post new calculated int field", async () => {
     const loginCookie = await getAdminLoginCookie();
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
 
     const ctx = encodeURIComponent(JSON.stringify({ table_id: table.id }));
     const app = await getApp({ disableCsrf: true });
@@ -257,14 +262,14 @@ describe("Field Endpoints", () => {
       .send("contextEnc=" + ctx1)
       .set("Cookie", loginCookie)
       .expect(toRedirect("/table/2"));
-    const table1 = await Table.findOne({ name: "books" });
+    const table1 = Table.findOne({ name: "books" });
 
     const row = await table1.getRow({ id: 1 });
     expect(row.pagesplus10).toBe(977);
   });
   it("should post new calculated string field", async () => {
     const loginCookie = await getAdminLoginCookie();
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
 
     const ctx = encodeURIComponent(JSON.stringify({ table_id: table.id }));
     const app = await getApp({ disableCsrf: true });
@@ -282,7 +287,7 @@ describe("Field Endpoints", () => {
   });
   it("should post new calculated float field", async () => {
     const loginCookie = await getAdminLoginCookie();
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
 
     const ctx = encodeURIComponent(JSON.stringify({ table_id: table.id }));
     const app = await getApp({ disableCsrf: true });
@@ -300,7 +305,7 @@ describe("Field Endpoints", () => {
   });
   it("should post new calculated boolean field", async () => {
     const loginCookie = await getAdminLoginCookie();
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
 
     const ctx = encodeURIComponent(JSON.stringify({ table_id: table.id }));
     const app = await getApp({ disableCsrf: true });
@@ -318,7 +323,7 @@ describe("Field Endpoints", () => {
   });
   it("should test expression", async () => {
     const loginCookie = await getAdminLoginCookie();
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
 
     const ctx = encodeURIComponent(JSON.stringify({ table_id: table.id }));
     const app = await getApp({ disableCsrf: true });
@@ -334,7 +339,7 @@ describe("Field Endpoints", () => {
   });
   it("should test stored expression", async () => {
     const loginCookie = await getAdminLoginCookie();
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
 
     const ctx = encodeURIComponent(JSON.stringify({ table_id: table.id }));
     const app = await getApp({ disableCsrf: true });
@@ -348,9 +353,57 @@ describe("Field Endpoints", () => {
       .set("Cookie", loginCookie)
       .expect(toInclude(" is: <pre>2</pre>"));
   });
+  it("should show on stored expression with joinfield", async () => {
+    const loginCookie = await getAdminLoginCookie();
+    const table = Table.findOne({ name: "books" });
+
+    const ctx = encodeURIComponent(JSON.stringify({ table_id: table.id }));
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .post("/field/test-formula")
+      .send({
+        formula: "publisher.name",
+        tablename: "books",
+        stored: true,
+      })
+      .set("Cookie", loginCookie)
+      .expect(toInclude(" is: <pre>"));
+  });
+  it("should show on stored expression with half-hjoinfield", async () => {
+    const loginCookie = await getAdminLoginCookie();
+    const table = Table.findOne({ name: "books" });
+
+    const ctx = encodeURIComponent(JSON.stringify({ table_id: table.id }));
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .post("/field/test-formula")
+      .send({
+        formula: "publisherⱵname",
+        tablename: "books",
+        stored: true,
+      })
+      .set("Cookie", loginCookie)
+      .expect(toInclude(" is: <pre>"));
+  });
+  it("should fail on non-stored expression with joinfield", async () => {
+    const loginCookie = await getAdminLoginCookie();
+    const table = Table.findOne({ name: "books" });
+
+    const ctx = encodeURIComponent(JSON.stringify({ table_id: table.id }));
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .post("/field/test-formula")
+      .send({
+        formula: "publisher.name",
+        tablename: "books",
+        stored: false,
+      })
+      .set("Cookie", loginCookie)
+      .expect(400);
+  });
   it("should show calculated", async () => {
     const loginCookie = await getAdminLoginCookie();
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
     await Field.create({
       table,
       label: "pagesp1",
@@ -363,6 +416,532 @@ describe("Field Endpoints", () => {
     await request(app)
       .post("/field/show-calculated/books/pagesp1/show")
       .set("Cookie", loginCookie)
-      .expect((r) => +r.body > 1);
+      .send({
+        id: 1,
+      })
+      .expect(toBeTrue((r) => +r.text > 500 && +r.text < 1500));
+  });
+  it("should show calculated field with single joinfield", async () => {
+    const loginCookie = await getAdminLoginCookie();
+    const table = Table.findOne({ name: "patients" });
+    await Field.create({
+      table,
+      label: "pagesp1",
+      type: "Integer",
+      calculated: true,
+      stored: true,
+      expression: "favbook.pages+1",
+    });
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post("/field/show-calculated/patients/pagesp1/show")
+      .set("Cookie", loginCookie)
+      .send({
+        id: 1,
+      })
+      .expect(toBeTrue((r) => +r.text > 2));
+  });
+  it("should show calculated field with two single joinfields", async () => {
+    const loginCookie = await getAdminLoginCookie();
+    const table = Table.findOne({ name: "patients" });
+    await Field.create({
+      table,
+      label: "pagesp12",
+      type: "Integer",
+      calculated: true,
+      stored: true,
+      expression: "favbook.pages+1+favbook.id",
+    });
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post("/field/show-calculated/patients/pagesp12/show")
+      .set("Cookie", loginCookie)
+      .send({
+        id: 1,
+      })
+      .expect(toBeTrue((r) => +r.text > 2));
+  });
+  it("should show calculated field with double joinfield", async () => {
+    const loginCookie = await getAdminLoginCookie();
+    const table = Table.findOne({ name: "readings" });
+    await Field.create({
+      table,
+      label: "pagesp1",
+      type: "Integer",
+      calculated: true,
+      stored: true,
+      expression: "patient_id.favbook.pages+1",
+    });
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post("/field/show-calculated/readings/pagesp1/show")
+      .set("Cookie", loginCookie)
+      .send({
+        id: 1,
+      })
+      .expect(toBeTrue((r) => +r.text > 2));
+  });
+  it("should show-calculated on join field value", async () => {
+    const loginCookie = await getAdminLoginCookie();
+
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post("/field/show-calculated/books/publisher.name/as_text")
+      .set("Cookie", loginCookie)
+      .send({
+        publisher: 1,
+      })
+      .expect(toBeTrue((r) => r.text === "AK Press"));
+  });
+  it("should show-calculated on join field value", async () => {
+    const loginCookie = await getAdminLoginCookie();
+
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post("/field/show-calculated/books/publisher.name/code")
+      .set("Cookie", loginCookie)
+      .send({
+        publisher: 1,
+      })
+      .expect(toBeTrue((r) => r.text === "<pre><code>AK Press</code></pre>"));
+  });
+  it("should show-calculated on join field value", async () => {
+    const loginCookie = await getAdminLoginCookie();
+
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post("/field/show-calculated/books/publisher.name/code")
+      .set("Cookie", loginCookie)
+      .send({
+        publisher: 1,
+      })
+      .expect(toBeTrue((r) => r.text === "<pre><code>AK Press</code></pre>"));
+  });
+  it("should show-calculated on join field value", async () => {
+    const loginCookie = await getAdminLoginCookie();
+
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post(
+        "/field/show-calculated/books/publisher.name/show_with_html?code=pub%3A%7B%7Bit.toLowerCase()%7D%7D"
+      )
+      .set("Cookie", loginCookie)
+      .send({
+        publisher: 1,
+      })
+      .expect(toBeTrue((r) => r.text === "pub:ak press"));
+  });
+  it("should show-calculated on double-join field value", async () => {
+    const loginCookie = await getAdminLoginCookie();
+
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post("/field/show-calculated/patients/favbook.publisher.name/as_text")
+      .set("Cookie", loginCookie)
+      .send({
+        favbook: 2,
+      })
+      .expect(toBeTrue((r) => r.text === "AK Press"));
+  });
+  it("should not show unauth show-calculated on double-join field value", async () => {
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post("/field/show-calculated/patients/favbook.publisher.name/as_text")
+
+      .send({
+        favbook: 2,
+      })
+      .expect(401);
+  });
+  it("should preview field", async () => {
+    const loginCookie = await getAdminLoginCookie();
+
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post("/field/preview/books/author/code")
+      .set("Cookie", loginCookie)
+      .send({})
+      .expect(
+        toBeTrue((r) =>
+          r.text.includes("<pre><code>Herman Melville</code></pre>")
+        )
+      );
+  });
+  it("should preview joinfield", async () => {
+    const loginCookie = await getAdminLoginCookie();
+
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post("/field/preview/books/publisher.name/code")
+      .set("Cookie", loginCookie)
+      .send({})
+      .expect(
+        toBeTrue((r) => r.text.includes("<pre><code>AK Press</code></pre>"))
+      );
+  });
+  it("should preview joinfield with cfg", async () => {
+    const loginCookie = await getAdminLoginCookie();
+
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post("/field/preview/books/publisher.name/show_with_html")
+      .set("Cookie", loginCookie)
+      .send({
+        configuration: {
+          code: "pub:{{it.toLowerCase()}}",
+        },
+      })
+      .expect(toBeTrue((r) => r.text.includes("pub:ak press")));
+  });
+});
+
+describe("Field default expression", () => {
+  it("should keep default_expression when editing a nonrequired key field", async () => {
+    const loginCookie = await getAdminLoginCookie();
+    const table = await Table.create("FieldDefaultExprTable");
+    const field = await Field.create({
+      table,
+      name: "created_by",
+      label: "Created by",
+      type: "Key",
+      reftable_name: "users",
+      required: false,
+      attributes: { default_expression: "user?.id", summary_field: "email" },
+    });
+    //this is the context the edit wizard holds after the Basic properties step
+    const ctx = encodeURIComponent(
+      JSON.stringify({
+        ...field.toJson,
+        ...field.attributes,
+        type: "Key to users",
+      })
+    );
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .post("/field/")
+      .send("stepName=Summary")
+      .send("contextEnc=" + ctx)
+      .send("summary_field=id")
+      .send("on_delete=Fail")
+      .set("Cookie", loginCookie)
+      .expect(toRedirect(`/table/${table.id}`));
+    const updated = await Field.findOne({ id: field.id });
+    expect(updated.attributes.summary_field).toBe("id");
+    expect(updated.attributes.default_expression).toBe("user?.id");
+    const tbl = Table.findOne({ name: "FieldDefaultExprTable" });
+    const id = await tbl.insertRow({}, { id: 1, role_id: 1 });
+    const rows = await tbl.getRows({ id });
+    expect(rows[0].created_by).toBe(1);
+  });
+});
+
+
+describe("show-calculated ownership checks", () => {
+  const SECRET = "the eagle has landed";
+  const mkOwnedTable = async () => {
+    const tbl = await Table.create("ownedsecrets", {
+      min_role_read: 40,
+      min_role_write: 40,
+    });
+    await Field.create({
+      table: tbl,
+      name: "owner",
+      label: "Owner",
+      type: "Key",
+      reftable_name: "users",
+      attributes: { summary_field: "email" },
+      required: false,
+    });
+    await Field.create({
+      table: tbl,
+      name: "secret",
+      label: "Secret",
+      type: "String",
+    });
+    await tbl.update({ ownership_formula: "owner === user.id" });
+    const owned = Table.findOne({ name: "ownedsecrets" });
+    const admin = await User.findOne({ email: "admin@foo.com" });
+    const id = await owned.insertRow({
+      owner: admin.id,
+      secret: SECRET,
+    });
+    return { table: owned, id };
+  };
+
+  const shouldNotLeak = (res) => {
+    if (res.text.includes(SECRET))
+      throw new Error(
+        `Expected secret to be absent, but was present (status ${res.statusCode})`
+      );
+  };
+
+  it("should not show field value of row not owned", async () => {
+    const { id } = await mkOwnedTable();
+    const loginCookie = await getUserLoginCookie();
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post("/field/show-calculated/ownedsecrets/secret/show")
+      .set("Cookie", loginCookie)
+      .send({ id })
+      .expect(401)
+      .expect(shouldNotLeak);
+  });
+
+  it("should not allow ownership formula to be spoofed by posted values", async () => {
+    const user = await User.findOne({ email: "user@foo.com" });
+    const owned = Table.findOne({ name: "ownedsecrets" });
+    const [row] = await owned.getRows({});
+    const loginCookie = await getUserLoginCookie();
+    const app = await getApp({ disableCsrf: true });
+
+    // user@foo.com does not own this row, but posts a spoofed value for the
+    // field the ownership formula is based on. The posted values must not be
+    // able to satisfy the ownership check for the stored row.
+    await request(app)
+      .post("/field/show-calculated/ownedsecrets/secret/show")
+      .set("Cookie", loginCookie)
+      .send({ id: row.id, owner: user.id })
+      .expect(shouldNotLeak);
+  });
+});
+
+describe("Fieldview config", () => {
+  //itShouldRedirectUnauthToLogin("/field/2");
+  it("should return fieldview options", async () => {
+    const loginCookie = await getAdminLoginCookie();
+
+    const app = await getApp({ disableCsrf: true });
+
+    await request(app)
+      .post("/field/fieldviewcfgform/books")
+      .set("Cookie", loginCookie)
+      .send({
+        type: "Field",
+        field_name: "pages",
+        fieldview: "progress_bar",
+      })
+      .expect(toInclude(`<div class="form-group"><div class="form-check">`))
+      .expect(
+        toInclude(
+          `<div><label for="inputpx_height">Height in px</label></div><div><input type="number" class="form-control  item-menu" data-fieldname="px_height" name="px_height" id="inputpx_height" step="1"></div>`
+        )
+      );
+  });
+});
+
+describe("Click to edit save", () => {
+  const origAuthorListCfg = () =>
+    View.findOne({ name: "authorlist" }).configuration;
+  let savedCfg;
+
+  beforeAll(async () => {
+    savedCfg = origAuthorListCfg();
+    const view = View.findOne({ name: "authorlist" });
+    await View.update(
+      {
+        configuration: {
+          columns: [
+            { type: "Field", field_name: "author", state_field: "on" },
+            {
+              type: "Field",
+              field_name: "pages",
+              fieldview: "show",
+              click_to_edit: true,
+            },
+            {
+              type: "JoinField",
+              join_field: "publisher.name",
+              fieldview: "as_text",
+              click_to_edit: true,
+            },
+          ],
+        },
+      },
+      view.id
+    );
+  });
+  afterAll(async () => {
+    const view = View.findOne({ name: "authorlist" });
+    await View.update({ configuration: savedCfg }, view.id);
+  });
+
+  // find the fielddata payload the list view puts on click-to-edit cells
+  const getFieldData = async (app, loginCookie, pred) => {
+    const res = loginCookie
+      ? await request(app).get("/view/authorlist").set("Cookie", loginCookie)
+      : await request(app).get("/view/authorlist");
+    const matches = [
+      ...res.text.matchAll(/data-inline-edit-fielddata="([^"]*)"/g),
+    ].map((m) => m[1]);
+    const found = matches.find((fd) =>
+      pred(JSON.parse(decodeURIComponent(fd)))
+    );
+    expect(found).toBeDefined();
+    return found;
+  };
+
+  it("should save click-to-edit field", async () => {
+    const loginCookie = await getAdminLoginCookie();
+    const app = await getApp({ disableCsrf: true });
+    const books = Table.findOne({ name: "books" });
+    const book = await books.getRow({ author: "Herman Melville" });
+    expect(book.pages).toBe(967);
+
+    const fielddata = await getFieldData(
+      app,
+      loginCookie,
+      (fd) => fd.field_name === "pages" && fd.pk === book.id
+    );
+
+    await request(app)
+      .post("/field/save-click-edit")
+      .set("Cookie", loginCookie)
+      .send(`_fielddata=${encodeURIComponent(fielddata)}&pages=1024`)
+      .expect(toInclude("1024"));
+
+    const updated = await books.getRow({ id: book.id });
+    expect(updated.pages).toBe(1024);
+  });
+
+  it("should save click-to-edit join field", async () => {
+    const loginCookie = await getAdminLoginCookie();
+    const app = await getApp({ disableCsrf: true });
+    const books = Table.findOne({ name: "books" });
+    const publishers = Table.findOne({ name: "publisher" });
+    const book = await books.getRow({ author: "Leo Tolstoy" });
+    const akpress = await publishers.getRow({ name: "AK Press" });
+    const nostarch = await publishers.getRow({ name: "No starch" });
+    expect(book.publisher).toBe(akpress.id);
+
+    const fielddata = await getFieldData(
+      app,
+      loginCookie,
+      (fd) =>
+        fd.field_name === "publisher" &&
+        fd.join_field === "name" &&
+        fd.pk === book.id
+    );
+
+    await request(app)
+      .post("/field/save-click-edit")
+      .set("Cookie", loginCookie)
+      .send(
+        `_fielddata=${encodeURIComponent(fielddata)}&publisher=${nostarch.id}`
+      )
+      .expect(toInclude("No starch"));
+
+    const updated = await books.getRow({ id: book.id });
+    expect(updated.publisher).toBe(nostarch.id);
+  });
+  it("should not save click-to-edit field if unauthenticated", async () => {
+    const loginCookie = await getAdminLoginCookie();
+    const app = await getApp({ disableCsrf: true });
+    const books = Table.findOne({ name: "books" });
+    const book = await books.getRow({ author: "Herman Melville" });
+    await books.updateRow({ pages: 967 }, book.id);
+
+    const fielddata = await getFieldData(
+      app,
+      loginCookie,
+      (fd) => fd.field_name === "pages" && fd.pk === book.id
+    );
+
+    const r=await request(app)
+      .post("/field/save-click-edit")
+      .send(`_fielddata=${encodeURIComponent(fielddata)}&pages=1024`)
+      .expect(toInclude("Not authorized", 401));
+    const updated = await books.getRow({ id: book.id });
+    expect(updated.pages).toBe(967);
+  });
+});
+
+describe("Click to edit save referenced row authorization", () => {
+  const SECRET = "VAULT-SECRET-P4SS-9f27";
+  let taskId, vaultId, adminId;
+
+  beforeAll(async () => {
+    const vault = await Table.create("clickedit_vault", {
+      min_role_read: 1,
+      min_role_write: 1,
+    });
+    await Field.create({
+      table: vault,
+      name: "secret",
+      label: "Secret",
+      type: "String",
+    });
+    vaultId = await Table.findOne({ name: "clickedit_vault" }).insertRow({
+      secret: SECRET,
+    });
+
+    const tasks = await Table.create("clickedit_tasks", {
+      min_role_read: 80,
+      min_role_write: 80,
+    });
+    await Field.create({
+      table: tasks,
+      name: "reviewer",
+      label: "Reviewer",
+      type: "Key",
+      reftable_name: "users",
+      attributes: { summary_field: "email" },
+      required: false,
+    });
+    await Field.create({
+      table: tasks,
+      name: "vault_ref",
+      label: "Vault ref",
+      type: "Key",
+      reftable_name: "clickedit_vault",
+      attributes: { summary_field: "secret" },
+      required: false,
+    });
+    taskId = await Table.findOne({ name: "clickedit_tasks" }).insertRow({
+      reviewer: null,
+      vault_ref: null,
+    });
+    adminId = (await User.findOne({ email: "admin@foo.com" })).id;
+  });
+
+  const post = async (field_name, join_field, val) => {
+    const loginCookie = await getUserLoginCookie();
+    const app = await getApp({ disableCsrf: true });
+    const fielddata = JSON.stringify({
+      table_name: "clickedit_tasks",
+      field_name,
+      pk: taskId,
+      fieldview: "as_text",
+      configuration: {},
+      join_field,
+    });
+    return await request(app)
+      .post("/field/save-click-edit")
+      .set("Cookie", loginCookie)
+      .send(
+        `_fielddata=${encodeURIComponent(fielddata)}&${field_name}=${val}`
+      );
+  };
+
+  it("should not disclose fields of restricted users row", async () => {
+    const res = await post("reviewer", "email", adminId);
+    expect(res.text).not.toContain("admin@foo.com");
+  });
+
+  it("should not disclose fields of restricted table row", async () => {
+    const res = await post("vault_ref", "secret", vaultId);
+    expect(res.text).not.toContain(SECRET);
   });
 });

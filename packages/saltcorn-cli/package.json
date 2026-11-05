@@ -2,35 +2,49 @@
   "name": "@saltcorn/cli",
   "description": "Command-line interface for Saltcorn, open-source no-code platform",
   "homepage": "https://saltcorn.com",
-  "version": "0.6.1",
+  "version": "1.7.0-beta.4",
   "author": "Tom Nielsen @glutamate",
   "bin": {
     "saltcorn": "./bin/saltcorn"
   },
   "bugs": "https://github.com/saltcorn/saltcorn/issues",
   "dependencies": {
-    "@oclif/command": "^1.8.3",
-    "@oclif/config": "^1.17.1",
-    "@oclif/plugin-help": "^3.2.5",
-    "@saltcorn/data": "0.6.1",
-    "@saltcorn/server": "0.6.1",
-    "cli-ux": "^5.6.3",
-    "contractis": "^0.1.0",
-    "dateformat": "^3.0.3",
-    "inquirer": "^7.3.3",
+    "@oclif/core": "4.4.0",
+    "@oclif/plugin-plugins": "^5.4.26",
+    "@saltcorn/admin-models": "1.7.0-beta.4",
+    "@saltcorn/common-code": "1.7.0-beta.4",
+    "@saltcorn/data": "1.7.0-beta.4",
+    "@saltcorn/mobile-app": "1.7.0-beta.4",
+    "@saltcorn/mobile-builder": "1.7.0-beta.4",
+    "@saltcorn/plugins-loader": "1.7.0-beta.4",
+    "@saltcorn/server": "1.7.0-beta.4",
+    "@saltcorn/types": "1.7.0-beta.4",
+    "dateformat": "^4.6.3",
+    "inquirer": "^12.3.3",
     "js-yaml": "^4.1.0",
-    "node-fetch": "2.6.2",
+    "node-fetch": "2.6.9",
+    "node-watch": "^0.7.4",
+    "npm-registry-fetch": "17.1.0",
+    "source-map-support": "^0.5.21",
     "sudo": "^1.0.3",
-    "systeminformation": "^5.9.15",
+    "systeminformation": "^5.25.11",
     "tcp-port-used": "^1.0.2",
     "wrk": "^1.2.1"
   },
   "devDependencies": {
-    "@oclif/dev-cli": "^1.26.0",
-    "globby": "^10.0.2"
+    "oclif": "4.17.17",
+    "globby": "^11.1.0",
+    "ts-node": "^10.9.2"
+  },
+  "overrides": {
+    "undici": "7.12.0",
+    "node-gyp": ">=10.2.0",
+    "glob": ">=9.3.5",
+    "parse5": "7.2.1",
+    "parse5-htmlparser2-tree-adapter": "7.0.0"
   },
   "engines": {
-    "node": ">=8.0.0"
+    "node": ">=18.0.0"
   },
   "files": [
     "/bin",
@@ -46,16 +60,15 @@
   "oclif": {
     "commands": "./src/commands",
     "bin": "saltcorn",
-    "plugins": [
-      "@oclif/plugin-help"
-    ]
+    "repositoryPrefix": "<%- repo %>/blob/v<%- version %>/packages/saltcorn-cli/<%- commandPath %>"
   },
   "repository": "github:saltcorn/saltcorn",
   "scripts": {
     "postpack": "rm -f oclif.manifest.json",
-    "prepack": "oclif-dev manifest && oclif-dev readme",
+    "manifest": "oclif manifest && oclif readme",
     "test": "echo NO TESTS",
-    "version": "oclif-dev readme && git add README.md"
+    "tsc": "echo \"Error: no TypeScript support yet\"",
+    "clean": "echo \"Error: no TypeScript support yet\""
   },
   "publishConfig": {
     "access": "public"

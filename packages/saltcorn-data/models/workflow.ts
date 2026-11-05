@@ -1,0 +1,388 @@
+/**
+ * view description
+ * @category saltcorn-data
+ * @module models/workflow
+ * @subcategory models
+ */
+
+import { getState } from "../db/state.js";
+import { applyAsync, apply, asyncMap } from "../utils.js";
+import { instanceOfType } from "@saltcorn/types/common_types";
+import type {
+  AbstractWorkflow,
+  RunResult,
+} from "@saltcorn/types/model-abstracts/abstract_workflow";
+
+import db from "../db/index.js";
+
+import type Field from "./field.js";
+import Form from "./form.js";
+
+import { build_schema_data } from "../plugin-helper.js";
+import FieldRepeat from "./fieldrepeat.js";
+
+/**
+ * Workflow class
+ * @category saltcorn-data
+ */
+class Workflow implements AbstractWorkflow {
+  steps: any[];
+  onDone: (context: any) => any;
+  onStepSuccess?: (step: any, context: any) => any;
+  action?: string | undefined;
+  __: any;
+  saveURL?: string;
+  onStepSave?: (step: any, context: any, formVals: any) => any;
+  startAtStepURL?: (stepName: string) => string;
+  autoSave?: boolean;
+  previewURL?: string;
+  modifyForm?: (form: Form) => void;
+
+  /**
+   * Workflow constructor
+   * @param {*} o
+   */
+  constructor(o: WorkflowCfg) {
+    this.steps = o.steps || [];
+    this.onDone = o.onDone || ((c) => c);
+    this.onStepSuccess = o.onStepSuccess;
+    this.action = o.action;
+    this.previewURL = o.previewURL;
+    this.__ = (s: any) => s;
+    this.onStepSave = o.onStepSave;
+    this.modifyForm = o.modifyForm;
+  }
+  async singleStepForm(body?: any, req?: any): Promise<RunResult | undefined> {
+    if (req) this.__ = (s: any) => req.__(s);
+    if (!body || !body.stepName) {
+      return this.runStep(body || {}, 0);
+    }
+    const { stepName, contextEnc, ...stepBody } = body;
+
+    const context = JSON.parse(decodeURIComponent(contextEnc));
+    const stepIx = this.steps.findIndex((step) => step.name === stepName);
+    if (stepIx === -1) {
+      //error
+    }
+    const step = this.steps[stepIx];
+    if (step.form) {
+      const form = await applyAsync(step.form, context);
+      if (this.modifyForm) this.modifyForm(form);
+      let savingErrors = null;
+      const valres = form.validate(stepBody);
+      if (valres.errors) {
+        form.hidden("stepName", "contextEnc");
+        form.values.stepName = step.name;
+        form.values.contextEnc = contextEnc;
+
+        if (this.action) form.action = this.action;
+        if (!form.submitLabel)
+          form.submitLabel =
+            stepIx === this.steps.length - 1
+              ? this.__("Finish") + " &raquo;"
+              : this.__("Next") + " &raquo;";
+        if (!form.onSubmit) form.onSubmit = "press_store_button(this)";
+        await addApplyButtonToForm(form, this, context);
+      } else if (this.onStepSave) {
+        const saveRes = await this.onStepSave(step, context, valres.success);
+        if (saveRes) savingErrors = saveRes.savingErrors;
+      }
+      return {
+        renderForm: form,
+        context,
+        stepName: step.name,
+        currentStep: stepIx + 1,
+        maxSteps: this.steps.length,
+        title: this.title(step, stepIx),
+        contextField: step.contextField,
+        ...(step.disablePreview ? {} : { previewURL: this.previewURL }),
+        savingErrors,
+      };
+    }
+  }
+
+  async prepareForm(form: Form) {
+    const iter = async (f: Field | FieldRepeat) => {
+      if (f instanceof FieldRepeat) await asyncMap(f.fields, iter);
+      else if (f.type === "File") {
+        if (f.fieldview && !f.fieldviewObj)
+          f.fieldviewObj = getState()!.fileviews[f.fieldview];
+        await f.fill_fkey_options();
+      }
+    };
+    await asyncMap(form.fields, iter);
+  }
+
+  /**
+   * @param {object} body
+   * @param {object} req
+   * @returns {Promise<object>}
+   */
+  async run(body?: any, req?: any): Promise<RunResult> {
+    if (req) this.__ = (s: any) => req.__(s);
+    if (!body || !body.stepName) {
+      return this.runStep(body || {}, 0);
+    }
+
+    const { stepName, contextEnc, ...stepBody } = body;
+
+    if (!contextEnc) {
+      const startStepIx = this.steps.findIndex(
+        (step) => step.name === stepName
+      );
+
+      return this.runStep(stepBody || {}, startStepIx);
+    }
+    const context = JSON.parse(decodeURIComponent(contextEnc));
+    const stepIx = this.steps.findIndex((step) => step.name === stepName);
+    if (stepIx === -1) {
+      //error
+    }
+    const step = this.steps[stepIx];
+    if (step.form) {
+      const form = await applyAsync(step.form, context);
+      if (this.modifyForm) this.modifyForm(form);
+
+      await this.prepareForm(form);
+      const valres = form.validate(stepBody);
+      if (valres.errors) {
+        form.hidden("stepName", "contextEnc");
+        form.values.stepName = step.name;
+        form.values.contextEnc = contextEnc;
+
+        if (this.action) form.action = this.action;
+        if (!form.submitLabel)
+          form.submitLabel =
+            stepIx === this.steps.length - 1
+              ? this.__("Finish") + " &raquo;"
+              : this.__("Next") + " &raquo;";
+        if (!form.onSubmit) form.onSubmit = "press_store_button(this)";
+
+        await addApplyButtonToForm(form, this, context);
+
+        return {
+          renderForm: form,
+          context,
+          stepName: step.name,
+          currentStep: stepIx + 1,
+          maxSteps: this.steps.length,
+          title: this.title(step, stepIx),
+          ...(step.disablePreview ? {} : { previewURL: this.previewURL }),
+        };
+      }
+      const toCtx = step.contextField
+        ? {
+            ...(context[step.contextField] || {}),
+            ...valres.success,
+          }
+        : valres.success;
+      let newCtx = null;
+      if (step.contextField) {
+        newCtx = { ...context };
+        newCtx[step.contextField] = toCtx;
+      } else {
+        newCtx = { ...context, ...toCtx };
+      }
+      if (this.onStepSuccess) await this.onStepSuccess(step, newCtx);
+      return this.runStep(newCtx, stepIx + 1);
+    } else if (step.builder) {
+      const toCtx0 = {
+        columns: JSON.parse(decodeURIComponent(body.columns)),
+        layout: JSON.parse(decodeURIComponent(body.layout)),
+        //craft_nodes: JSON.parse(decodeURIComponent(body.craft_nodes))
+      };
+      const toCtx = step.contextField
+        ? {
+            [step.contextField]: {
+              ...(context[step.contextField] || {}),
+              ...toCtx0,
+            },
+          }
+        : toCtx0;
+      return this.runStep({ ...context, ...toCtx }, stepIx + 1);
+    }
+    throw new Error("unknown workflow run result");
+  }
+
+  /**
+   * @param {object} context
+   * @param {number} stepIx
+   * @returns {Promise<object>}
+   */
+  async runStep(context: any, stepIx: number): Promise<RunResult> {
+    if (stepIx >= this.steps.length) {
+      return await this.onDone(context);
+    }
+    const step = this.steps[stepIx];
+    if (step.onlyWhen) {
+      const toRun = await applyAsync(step.onlyWhen, context);
+
+      if (!toRun) return this.runStep(context, stepIx + 1);
+    }
+    if (step.form) {
+      const form = await applyAsync(step.form, context);
+      if (this.modifyForm) this.modifyForm(form);
+      await this.prepareForm(form);
+
+      form.hidden("stepName", "contextEnc");
+      form.values.stepName = step.name;
+      form.values.contextEnc = encodeURIComponent(JSON.stringify(context));
+
+      form.fields.forEach((fld: Field) => {
+        const ctxValue =
+          step.contextField && fld.parent_field
+            ? ((context[step.contextField] || {})[fld.parent_field] || {})[
+                fld.name
+              ]
+            : step.contextField
+              ? (context[step.contextField] || {})[fld.name]
+              : context[fld.name];
+        if (
+          typeof ctxValue !== "undefined" &&
+          typeof form.values[fld.name] === "undefined"
+        ) {
+          const value =
+            instanceOfType(fld.type) && fld.type.read
+              ? fld.type.read(ctxValue, fld.attributes)
+              : ctxValue;
+          if (fld.parent_field) {
+            form.values[`${fld.parent_field}_${fld.name}`] = value;
+          } else form.values[fld.name] = value;
+        }
+      });
+      if (this.action) form.action = this.action;
+      if (!form.submitLabel)
+        form.submitLabel =
+          stepIx === this.steps.length - 1
+            ? this.__("Finish") + " &raquo;"
+            : this.__("Next") + " &raquo;";
+      if (!form.onSubmit) form.onSubmit = "press_store_button(this)";
+
+      await addApplyButtonToForm(form, this, context);
+      return {
+        renderForm: form,
+        context,
+        stepName: step.name,
+        currentStep: stepIx + 1,
+        maxSteps: this.steps.length,
+        title: this.title(step, stepIx),
+        ...(step.disablePreview ? {} : { previewURL: this.previewURL }),
+      };
+    } else if (step.builder) {
+      const File = (await import("./file.js")).default;
+      let options;
+      try {
+        await File.buildDirCache();
+        options = {
+          ...(await applyAsync(step.builder, context)),
+          fonts: getState()!.fonts,
+        };
+      } finally {
+        File.destroyDirCache();
+      }
+      const Table = (await import("./table.js")).default;
+      const table = Table.findOne(
+        context.table_id
+          ? { id: context.table_id }
+          : { name: context.exttable_name }
+      );
+      if (table) {
+        options.join_field_picker_data = {
+          join_field_options: await table.get_join_field_options(true, true),
+          relation_options: await table.get_relation_options(),
+        };
+      }
+      const { tables, views } = await build_schema_data();
+      options.tables = tables;
+      options.views = views;
+      options.max_relations_layer_depth = getState()!.getConfig(
+        "max_relations_layer_depth",
+        6
+      );
+      options.icons = getState()!.icons;
+      options.keyframes = getState()!.keyframes;
+
+      return {
+        renderBuilder: {
+          options,
+          context,
+          layout: context.layout,
+          action: this.action,
+          stepName: step.name,
+          mode: options.mode,
+          version_tag: db.connectObj.version_tag,
+        },
+        context,
+        stepName: step.name,
+        currentStep: stepIx + 1,
+        maxSteps: this.steps.length,
+        title: this.title(step, stepIx),
+      };
+    }
+    throw new Error("unknown workflow run result");
+  }
+
+  /**
+   * @param {object} step
+   * @param {number} stepIx
+   * @returns {string}
+   */
+  title(step: any, stepIx: number): string {
+    return `${step.name} (${this.__("step")} ${stepIx + 1} / ${
+      this.steps.length > stepIx + 1 ? this.__("max") + " " : ""
+    }${this.steps.length})`;
+  }
+}
+
+async function addApplyButtonToForm(
+  form: Form,
+  that: AbstractWorkflow,
+  context: any
+) {
+  if (that.saveURL) {
+    //TODO what if plugin has viewname as param
+    //console.log(that.steps);
+    const currentStep = form.values.stepName;
+    let prevStep;
+    if (that.startAtStepURL)
+      for (const step of that.steps) {
+        if (step.name === currentStep) break;
+        if (!step.onlyWhen) prevStep = step.name;
+        else {
+          const toRun = await applyAsync(step.onlyWhen, context);
+          if (toRun) prevStep = step.name;
+        }
+      }
+    if (that.autoSave)
+      form.onChange = `applyViewConfig(this, '${that.saveURL}', null, event)`;
+    form.additionalButtons = [
+      ...(form.additionalButtons || []),
+      ...(that.startAtStepURL && prevStep
+        ? [
+            {
+              label: "&laquo; " + that.__("Back"),
+              id: "btnbackwf",
+              class: "btn btn-outline-primary",
+              onclick: `applyViewConfig(this, '${
+                that.saveURL
+              }',()=>{location.href='${that.startAtStepURL(prevStep)}'})`,
+            },
+          ]
+        : []),
+      ...(!that.autoSave
+        ? [
+            {
+              label: that.__("Save"),
+              id: "btnsavewf",
+              class: "btn btn-outline-primary",
+              onclick: `applyViewConfig(this, '${that.saveURL}')`,
+            },
+          ]
+        : []),
+    ];
+  }
+}
+
+type WorkflowCfg = Partial<Workflow>;
+
+export default Workflow;

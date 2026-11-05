@@ -103,6 +103,9 @@ dist
 # TernJS port file
 .tern-port
 
+# vscode
+# .vscode/
+
 plugin_packages/
 git_plugins/
 *.sqlc
@@ -120,3 +123,25 @@ infosec_scan_tmp/
 docs/
 package-lock.json
 .vagrant/
+# `dist` (above) excludes the whole directory, so git won't descend into it and
+# a bare `!.../builder_bundle.js` negation can't re-include the file. Re-include
+# the dist dir, re-ignore its contents, then un-ignore the one bundle we track.
+!packages/saltcorn-builder/dist/
+packages/saltcorn-builder/dist/*
+!packages/saltcorn-builder/dist/builder_bundle.js
+!packages/saltcorn-builder/package-lock.json
+!packages/workflow-editor/dist/
+packages/workflow-editor/dist/*
+!packages/workflow-editor/dist/workflow_bundle.js
+!packages/workflow-editor/package-lock.json
+!/package-lock.json
+plugins_folder/
+
+*.sqlite-journal
+
+run_project.sh
+run_saltcorn.sh
+cireport.html
+CLAUDE.md
+.claude/
+.claude

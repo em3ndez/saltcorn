@@ -1,6 +1,6 @@
-const request = require("supertest");
-const getApp = require("../app");
-const {
+import { request as request } from "../auth/testhelp.js";
+import getApp from "../app.js";
+import {
   getStaffLoginCookie,
   getAdminLoginCookie,
   toRedirect,
@@ -9,12 +9,13 @@ const {
   toNotInclude,
   succeedJsonWith,
   resetToFixtures,
-} = require("../auth/testhelp");
-const db = require("@saltcorn/data/db");
-const Table = require("@saltcorn/data/models/table");
-const View = require("@saltcorn/data/models/view");
-const User = require("@saltcorn/data/models/user");
-const reset = require("@saltcorn/data/db/reset_schema");
+} from "../auth/testhelp.js";
+import db from "@saltcorn/data/db";
+import Table from "@saltcorn/data/models/table";
+import View from "@saltcorn/data/models/view";
+import Notification from "@saltcorn/data/models/notification";
+import User from "@saltcorn/data/models/user";
+import reset from "@saltcorn/data/db/reset_schema";
 
 beforeAll(async () => {
   await resetToFixtures();
@@ -42,6 +43,60 @@ describe("standard edit form", () => {
   });
 });
 
+describe("notifications", () => {
+  it("show empty notifications", async () => {
+    const loginCookie = await getStaffLoginCookie();
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .get("/notifications")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("No notifications"));
+  });
+  it("no unread notifications", async () => {
+    const loginCookie = await getStaffLoginCookie();
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .get("/notifications/count-unread")
+      .set("Cookie", loginCookie)
+      .expect(succeedJsonWith((n) => n === 0));
+  });
+  it("add notification", async () => {
+    const user = await User.findOne({ role_id: 40 });
+    await Notification.create({
+      user_id: user.id,
+      created: new Date(Date.now() - 5000),
+      title: "This is a staff announcement",
+      body: "Will a member of staff please proceed to the checkout area",
+      link: "https://www.sainsburys.co.uk/",
+    });
+  });
+  it("one unread notifications", async () => {
+    const loginCookie = await getStaffLoginCookie();
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .get("/notifications/count-unread")
+      .set("Cookie", loginCookie)
+      .expect(succeedJsonWith((n) => n === 1));
+  });
+  it("show new notifications", async () => {
+    const loginCookie = await getStaffLoginCookie();
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .get("/notifications")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("This is a staff announcement"))
+      .expect(toInclude(">a few seconds ago<"))
+      .expect(toInclude("unread-notify"));
+  });
+  it("no unread notifications", async () => {
+    const loginCookie = await getStaffLoginCookie();
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .get("/notifications/count-unread")
+      .set("Cookie", loginCookie)
+      .expect(succeedJsonWith((n) => n === 0));
+  });
+});
 describe("homepage", () => {
   it("shows to admin", async () => {
     const loginCookie = await getAdminLoginCookie();
@@ -110,14 +165,14 @@ describe("homepage", () => {
       .expect(toInclude("No views"));
   });
   it("shows with-view quick start", async () => {
-    const table = await Table.findOne({ name: "mytable" });
+    const table = Table.findOne({ name: "mytable" });
 
     const v = await View.create({
       table_id: table.id,
       name: "anewview",
       viewtemplate: "List",
       configuration: { columns: [], default_state: { foo: "bar" } },
-      min_role: 10,
+      min_role: 100,
     });
     const loginCookie = await getAdminLoginCookie();
 
@@ -147,7 +202,7 @@ describe("bool toggle", () => {
 
 describe("history", () => {
   it("should enable history", async () => {
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
 
     const loginCookie = await getAdminLoginCookie();
 
@@ -158,7 +213,7 @@ describe("history", () => {
       .send("id=" + table.id)
       .send("versioned=on")
       .expect(toRedirect("/table/" + table.id));
-    const table1 = await Table.findOne({ name: "books" });
+    const table1 = Table.findOne({ name: "books" });
     expect(table1.versioned).toBe(true);
   });
   it("create new row in versioned table", async () => {
@@ -178,7 +233,7 @@ describe("history", () => {
   it("edit row in versioned table", async () => {
     const loginCookie = await getAdminLoginCookie();
     const app = await getApp({ disableCsrf: true });
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
     const tolstoy = await table.getRow({ author: "Leo Tolstoy" });
     await request(app)
       .post("/api/books/" + tolstoy.id)
@@ -194,7 +249,7 @@ describe("history", () => {
   it("edit row in versioned table again", async () => {
     const loginCookie = await getAdminLoginCookie();
     const app = await getApp({ disableCsrf: true });
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
     const tolstoy = await table.getRow({ author: "Leo Tolstoy" });
     await request(app)
       .post("/api/books/" + tolstoy.id)
@@ -210,7 +265,7 @@ describe("history", () => {
 
   it("show versions", async () => {
     const loginCookie = await getAdminLoginCookie();
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
     const tolstoy = await table.getRow({ author: "Leo Tolstoy" });
     const app = await getApp({ disableCsrf: true });
     await request(app)
@@ -223,7 +278,7 @@ describe("history", () => {
   });
   it("restores old version", async () => {
     const loginCookie = await getAdminLoginCookie();
-    const table = await Table.findOne({ name: "books" });
+    const table = Table.findOne({ name: "books" });
     const tolstoy = await table.getRow({ author: "Leo Tolstoy" });
     const app = await getApp({ disableCsrf: true });
     await request(app)

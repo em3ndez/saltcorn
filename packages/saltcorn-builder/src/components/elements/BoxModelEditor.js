@@ -5,14 +5,21 @@
  */
 
 import React, { useContext, Fragment, useState } from "react";
+import useTranslation from "../../hooks/useTranslation";
 import { SettingsRow, SettingsSectionHeaderRow, bstyleopt } from "./utils";
+import PreviewCtx from "../preview_context";
+import {
+  getDeviceSizeNode,
+  getDeviceSizeSetProp,
+  getDisplaySize,
+} from "../../utils/responsive_utils";
 /* 
 Contains code from https://github.com/tpaksu/boxmodel
 Copyright (c) 2017 Taha Paksu
 */
 
 export /**
- * 
+ *
  * @param {object} props
  * @param {function} props.setProp
  * @param {object} props.node
@@ -21,19 +28,27 @@ export /**
  * @subcategory components
  * @namespace
  */
-const BoxModelEditor = ({ setProp, node }) => {
+const BoxModelEditor = ({ setProp, node, sizeWithStyle }) => {
+  const { t } = useTranslation();
+  const { previewDevice } = useContext(PreviewCtx);
   const [selectedCategory, setSelectedCategory] = useState(false);
   const [selectedDirection, setSelectedDirection] = useState(false);
   const selectedProperty = !selectedCategory
     ? false
     : selectedDirection
-    ? `${selectedCategory}-${selectedDirection}`
-    : selectedCategory;
+      ? `${selectedCategory}-${selectedDirection}`
+      : selectedCategory;
   const setCatAndDir = (c, d) => {
     setSelectedCategory(c);
     setSelectedDirection(d);
   };
-  //console.log(node.style);
+  const isDesktop = !previewDevice || previewDevice === "desktop";
+  const deviceLabel = previewDevice === "mobile"
+    ? ` (${t("mobile")})`
+    : previewDevice === "tablet"
+      ? ` (${t("tablet")})`
+      : "";
+
   const style = node.style;
   return (
     <Fragment>
@@ -45,7 +60,7 @@ const BoxModelEditor = ({ setProp, node }) => {
                 className="boxmodel-text boxmodel-header"
                 onClick={() => setCatAndDir("margin", null)}
               >
-                Margin
+                {t("Margin")}
               </span>
               <span
                 className="boxmodel-input-container boxmodel-input-direction-left"
@@ -61,7 +76,7 @@ const BoxModelEditor = ({ setProp, node }) => {
                   onClick={() => setCatAndDir("margin", "top")}
                 >
                   <input
-                    disabled
+                    readOnly={true}
                     type="text"
                     autoComplete="off"
                     name="boxmodel-ex-1_top_margin"
@@ -74,7 +89,7 @@ const BoxModelEditor = ({ setProp, node }) => {
                     className="boxmodel-text boxmodel-header"
                     onClick={() => setCatAndDir("border", null)}
                   >
-                    Border
+                    {t("Border")}
                   </span>
                   <span
                     className="boxmodel-input-container boxmodel-input-direction-left"
@@ -92,7 +107,7 @@ const BoxModelEditor = ({ setProp, node }) => {
                       onClick={() => setCatAndDir("border", "top")}
                     >
                       <input
-                        disabled
+                        readOnly={true}
                         type="text"
                         autoComplete="off"
                         name="boxmodel-ex-1_top_border"
@@ -109,7 +124,7 @@ const BoxModelEditor = ({ setProp, node }) => {
                         className="boxmodel-text boxmodel-header"
                         onClick={() => setCatAndDir("padding", null)}
                       >
-                        Padding
+                        {t("Padding")}
                       </span>
                       <span
                         className="boxmodel-input-container boxmodel-input-direction-left"
@@ -125,7 +140,7 @@ const BoxModelEditor = ({ setProp, node }) => {
                           onClick={() => setCatAndDir("padding", "top")}
                         >
                           <input
-                            disabled
+                            readOnly={true}
                             type="text"
                             autoComplete="off"
                             name="boxmodel-ex-1_top_padding"
@@ -140,29 +155,21 @@ const BoxModelEditor = ({ setProp, node }) => {
                           onClick={() => setSelectedCategory("size")}
                         >
                           <input
-                            disabled
+                            readOnly={true}
                             type="text"
                             autoComplete="off"
                             name="boxmodel-ex-1_width"
                             size="3"
-                            value={
-                              node.width
-                                ? `${node.width}${node.widthUnits || "px"}`
-                                : ""
-                            }
+                            value={getDisplaySize(node, "width", previewDevice, sizeWithStyle)}
                           />
                           x
                           <input
-                            disabled
+                            readOnly={true}
                             type="text"
                             autoComplete="off"
                             name="boxmodel-ex-1_height"
                             size="3"
-                            value={
-                              node.height
-                                ? `${node.height}${node.heightUnits || "px"}`
-                                : ""
-                            }
+                            value={getDisplaySize(node, "height", previewDevice, sizeWithStyle)}
                           />
                         </div>
                         <span
@@ -170,7 +177,7 @@ const BoxModelEditor = ({ setProp, node }) => {
                           onClick={() => setCatAndDir("padding", "bottom")}
                         >
                           <input
-                            disabled
+                            readOnly={true}
                             type="text"
                             autoComplete="off"
                             name="boxmodel-ex-1_bottom_padding"
@@ -195,7 +202,7 @@ const BoxModelEditor = ({ setProp, node }) => {
                       onClick={() => setCatAndDir("border", "bottom")}
                     >
                       <input
-                        disabled
+                        readOnly={true}
                         type="text"
                         autoComplete="off"
                         name="boxmodel-ex-1_bottom_border"
@@ -224,7 +231,7 @@ const BoxModelEditor = ({ setProp, node }) => {
                   onClick={() => setCatAndDir("margin", "bottom")}
                 >
                   <input
-                    disabled
+                    readOnly={true}
                     type="text"
                     autoComplete="off"
                     name="boxmodel-ex-1_bottom_margin"
@@ -268,23 +275,63 @@ const BoxModelEditor = ({ setProp, node }) => {
           {selectedCategory === "size" && (
             <Fragment>
               <SettingsRow
-                field={{ name: "width", label: "width", type: "DimUnits" }}
-                node={node}
-                setProp={setProp}
-              />
-              <SettingsRow
-                field={{ name: "height", label: "height", type: "DimUnits" }}
-                node={node}
-                setProp={setProp}
+                field={{
+                  name: "width",
+                  label: t("width") + deviceLabel,
+                  type: "DimUnits",
+                  horiz: true,
+                }}
+                node={isDesktop ? node : getDeviceSizeNode(node, "width", previewDevice)}
+                setProp={isDesktop ? setProp : getDeviceSizeSetProp(setProp, "width", previewDevice)}
+                isStyle={isDesktop ? !!sizeWithStyle : true}
               />
               <SettingsRow
                 field={{
-                  name: "minHeight",
-                  label: "min height",
+                  name: "min-width",
+                  label: t("min width"),
+                  type: "DimUnits",
+                  horiz: true,
+                }}
+                node={node}
+                setProp={setProp}
+                isStyle={true}
+              />
+              <SettingsRow
+                field={{
+                  name: "max-width",
+                  label: t("max width"),
+                  type: "DimUnits",
+                  horiz: true,
+                }}
+                node={node}
+                setProp={setProp}
+                isStyle={true}
+              />
+              <SettingsRow
+                field={{ name: "height", label: t("height") + deviceLabel, type: "DimUnits" }}
+                node={isDesktop ? node : getDeviceSizeNode(node, "height", previewDevice)}
+                setProp={isDesktop ? setProp : getDeviceSizeSetProp(setProp, "height", previewDevice)}
+                isStyle={isDesktop ? !!sizeWithStyle : true}
+              />
+              <SettingsRow
+                field={{
+                  name: sizeWithStyle ? "min-height" : "minHeight",
+                  label: t("min height"),
                   type: "DimUnits",
                 }}
                 node={node}
                 setProp={setProp}
+                isStyle={!!sizeWithStyle}
+              />
+              <SettingsRow
+                field={{
+                  name: "max-height",
+                  label: t("max height"),
+                  type: "DimUnits",
+                }}
+                node={node}
+                setProp={setProp}
+                isStyle={true}
               />
             </Fragment>
           )}
@@ -294,7 +341,7 @@ const BoxModelEditor = ({ setProp, node }) => {
               <SettingsRow
                 field={{
                   name: selectedProperty + "-width",
-                  label: "width",
+                  label: t("width"),
                   type: "DimUnits",
                 }}
                 node={node}
@@ -304,7 +351,7 @@ const BoxModelEditor = ({ setProp, node }) => {
               <SettingsRow
                 field={{
                   name: selectedProperty + "-style",
-                  label: "style",
+                  label: t("style"),
                   type: "btn_select",
                   btnClass: "btnstylesel",
                   options: [
@@ -325,7 +372,7 @@ const BoxModelEditor = ({ setProp, node }) => {
               <SettingsRow
                 field={{
                   name: selectedProperty + "-color",
-                  label: "color",
+                  label: t("color"),
                   type: "Color",
                 }}
                 node={node}
@@ -336,7 +383,7 @@ const BoxModelEditor = ({ setProp, node }) => {
                 <SettingsRow
                   field={{
                     name: selectedProperty + "-radius",
-                    label: "radius",
+                    label: t("radius"),
                     type: "DimUnits",
                   }}
                   node={node}
@@ -363,17 +410,17 @@ const BoxModelEditor = ({ setProp, node }) => {
           {!selectedProperty && (
             <tr>
               <td colSpan={2}>
-                <div>Click above to select a property to adjust.</div>
+                <div>{t("Click above to select a property to adjust.")}</div>
                 <div>
                   <small>
-                    Click a label (margin, border, padding) to adjust all edges.
+                    {t("Click a label (margin, border, padding) to adjust all edges.")}
                   </small>
                 </div>
                 <div>
-                  <small>Click an edge to adjust that edge.</small>
+                  <small>{t("Click an edge to adjust that edge.")}</small>
                 </div>
                 <div>
-                  <small>Click center to adjust height and width</small>
+                  <small>{t("Click center to adjust height and width")}</small>
                 </div>
               </td>
             </tr>

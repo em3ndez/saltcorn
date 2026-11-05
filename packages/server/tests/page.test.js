@@ -1,6 +1,6 @@
-const request = require("supertest");
-const getApp = require("../app");
-const {
+import { request as request } from "../auth/testhelp.js";
+import getApp from "../app.js";
+import {
   getStaffLoginCookie,
   getAdminLoginCookie,
   toRedirect,
@@ -10,12 +10,53 @@ const {
   toSucceed,
   toNotInclude,
   resetToFixtures,
-} = require("../auth/testhelp");
-const db = require("@saltcorn/data/db");
-const Page = require("@saltcorn/data/models/page");
+} from "../auth/testhelp.js";
+import db from "@saltcorn/data/db";
+import { getState } from "@saltcorn/data/db/state";
+import Page from "@saltcorn/data/models/page";
+import File from "@saltcorn/data/models/file";
+import { existsSync } from "fs";
+import { join } from "path";
+import fs from "fs";
+
+let htmlFile = null;
+
+const prepHtmlFiles = async () => {
+  const createFile = async (folder, name, content) => {
+    const scFolder = join(
+      db.connectObj.file_store,
+      db.getTenantSchema(),
+      folder
+    );
+    const html = `<html><head><title>Landing page</title></head><body><h1>${content}</h1></body></html>`;
+    if (!existsSync(scFolder)) await File.new_folder(folder);
+    if (!existsSync(join(scFolder, name))) {
+      const file = await File.from_contents(
+        name,
+        "text/html",
+        html,
+        1,
+        1,
+        folder
+      );
+      file.location = File.absPathToServePath(file.location);
+
+      return file;
+    } else {
+      const file = await File.from_file_on_disk(name, scFolder);
+      fs.writeFileSync(file.location, html);
+      file.location = File.absPathToServePath(file.location);
+      return file;
+    }
+  };
+  htmlFile = await createFile("/", "fixed_page.html", "Land here");
+  await createFile("/subfolder", "fixed_page2.html", "Or Land here");
+  await createFile("/", "test.html", "page with fixed html");
+};
 
 beforeAll(async () => {
   await resetToFixtures();
+  await prepHtmlFiles();
 });
 afterAll(db.close);
 
@@ -36,17 +77,39 @@ describe("page create", () => {
     await request(app)
       .get("/pageedit/new")
       .set("Cookie", loginCookie)
-
-      .expect(toInclude("A short name that will be in your URL"));
+      .expect(toInclude("A short name that will be in the page URL"));
+  });
+  it("shows new with html file selector", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .get("/pageedit/new")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("HTML file"))
+      .expect(toInclude("fixed_page.html"))
+      .expect(toInclude(join("subfolder", "fixed_page2.html")));
   });
   it("fills basic details", async () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     await request(app)
       .post("/pageedit/edit-properties")
-      .send("name=whales&title=Whales&description=about+whales&min_role=10")
+      .send("name=whales&title=Whales&description=about+whales&min_role=100")
       .set("Cookie", loginCookie)
       .expect(toRedirect("/pageedit/edit/whales"));
+  });
+  it("fills details with html-file", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .post("/pageedit/edit-properties")
+      .send(
+        `name=new_page_with_html_file&title=foo&description=bar&min_role=100&html_file=${encodeURIComponent(
+          htmlFile.location
+        )}`
+      )
+      .set("Cookie", loginCookie)
+      .expect(toRedirect("/pageedit/"));
   });
   it("fills layout", async () => {
     const app = await getApp({ disableCsrf: true });
@@ -68,6 +131,101 @@ describe("page create", () => {
       .set("Cookie", loginCookie)
       .expect(toInclude("Herman"));
   });
+
+  it("shows page with html file", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .get("/page/new_page_with_html_file")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("Land here"));
+  });
+
+  it("does not find the html file for staff or public", async () => {
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .post(`/files/setrole/fixed_page.html`)
+      .set("Cookie", await getAdminLoginCookie())
+      .send("role=1")
+      .expect(toRedirect("/files?dir=."));
+    const loginCookie = await getStaffLoginCookie();
+    await request(app)
+      .get("/page/new_page_with_html_file")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("not found", 404));
+    await request(app)
+      .get("/page/new_page_with_html_file")
+      .expect(toInclude("not found", 404));
+  });
+
+  it("finds the html file for staff (after update)", async () => {
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .post("/files/setrole/fixed_page.html")
+      .set("Cookie", await getAdminLoginCookie())
+      .send("role=40")
+      .expect(toRedirect("/files?dir=."));
+    const loginCookie = await getStaffLoginCookie();
+    await request(app)
+      .get("/page/new_page_with_html_file")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("Land here"));
+    await request(app)
+      .get("/page/new_page_with_html_file")
+      .expect(toInclude("not found", 404));
+  });
+});
+
+describe("homepage with html-file page", () => {
+  beforeAll(async () => {
+    await Page.create({
+      name: "html_home_test_page",
+      title: "HTML Home",
+      description: "",
+      min_role: 1,
+      layout: { html_file: htmlFile.location },
+    });
+  });
+  afterAll(async () => {
+    const p = Page.findOne({ name: "html_home_test_page" });
+    if (p) await p.delete();
+    await getState().setConfig("home_page_by_role", {});
+  });
+
+  it("serves html content when role home page uses an html file", async () => {
+    await getState().setConfig("home_page_by_role", {
+      1: "html_home_test_page",
+    });
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .get("/")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("Land here"));
+  });
+
+  it("injects csrf and pageloadtag globals into html_string page", async () => {
+    await Page.create({
+      name: "html_string_csrf_test",
+      title: "",
+      description: "",
+      min_role: 1,
+      layout: {
+        html_string:
+          "<html><head><title>Test</title></head><body>hello</body></html>",
+      },
+    });
+    const app = await getApp({ disableCsrf: false });
+    const loginCookie = await getAdminLoginCookie();
+    const resp = await request(app)
+      .get("/page/html_string_csrf_test")
+      .set("Cookie", loginCookie);
+    expect(resp.text).toContain("_sc_globalCsrf");
+    expect(resp.text).toContain("_sc_pageloadtag");
+    expect(resp.text.indexOf("_sc_globalCsrf")).toBeLessThan(
+      resp.text.indexOf("</head>")
+    );
+  });
 });
 
 describe("page action", () => {
@@ -76,7 +234,7 @@ describe("page action", () => {
       name: "pagewithaction",
       title: "",
       description: "",
-      min_role: 10,
+      min_role: 100,
       id: 2,
       layout: {
         widths: [6, 6],
@@ -85,7 +243,7 @@ describe("page action", () => {
           {
             type: "action",
             rndid: "56f3ac",
-            minRole: 10,
+            minRole: 100,
             isFormula: {},
             action_icon: "far fa-angry",
             action_name: "run_js_code",
@@ -132,7 +290,7 @@ describe("pageedit", () => {
     await request(app)
       .get("/pageedit/edit-properties/a_page")
       .set("Cookie", loginCookie)
-      .expect(toInclude("A short name that will be in your URL"));
+      .expect(toInclude("A short name that will be in the page URL"));
 
     //TODO full context
     const ctx = encodeURIComponent(JSON.stringify({}));
@@ -142,9 +300,44 @@ describe("pageedit", () => {
       .send("name=a_page")
       .send("title=mytitle")
       .send("description=mydescript")
-      .send("min_role=8")
+      .send("min_role=80")
       .send("id=1")
       .expect(toRedirect("/pageedit/"));
+  });
+  it("show builder", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .get("/pageedit/edit/a_page")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("<script>builder.renderBuilder"));
+  });
+  it("show editor with html file", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .get("/pageedit/edit/page_with_html_file")
+      .set("Cookie", loginCookie)
+      .expect(toInclude(`<textarea mode="text/html"`));
+  });
+  it("edit editor with html file", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    const newHtml =
+      "<html><head><title>title</title></head><body><h1>new html</h1></body</html>";
+    await request(app)
+      .get("/page/page_with_html_file")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("page with fixed html"));
+    await request(app)
+      .post("/pageedit/edit/page_with_html_file")
+      .set("Cookie", loginCookie)
+      .send("code=" + encodeURIComponent(newHtml))
+      .expect(toRedirect("/pageedit"));
+    await request(app)
+      .get("/page/page_with_html_file")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("new html"));
   });
 
   it("sets root page", async () => {
@@ -163,6 +356,51 @@ describe("pageedit", () => {
       .set("Cookie", loginCookie)
 
       .expect(toInclude("Root pages updated"));
+  });
+  it("shows Admin dashboard and All entities list options for admin role", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .get("/pageedit")
+      .set("Cookie", loginCookie)
+      .expect(toInclude("Admin dashboard"))
+      .expect(toInclude("All entities list"));
+  });
+  it("does not show All entities list option for non-admin roles", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    const res = await request(app)
+      .get("/pageedit")
+      .set("Cookie", loginCookie)
+      .expect(200);
+    // The value _sc_entities_list should appear exactly once (only for admin field)
+    const matches = (res.text.match(/_sc_entities_list/g) || []).length;
+    expect(matches).toBe(1);
+  });
+  it("redirects to /entities when admin home is set to entities list", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    await request(app)
+      .post("/pageedit/set_root_page")
+      .send("admin=_sc_entities_list")
+      .send("public=")
+      .send("user=")
+      .send("staff=")
+      .set("Cookie", loginCookie)
+      .expect(toRedirect("/pageedit"));
+    await request(app)
+      .get("/")
+      .set("Cookie", loginCookie)
+      .expect(toRedirect("/entities"));
+    // Reset admin home
+    await request(app)
+      .post("/pageedit/set_root_page")
+      .send("admin=")
+      .send("public=")
+      .send("user=")
+      .send("staff=")
+      .set("Cookie", loginCookie)
+      .expect(toRedirect("/pageedit"));
   });
   it("should delete page", async () => {
     const app = await getApp({ disableCsrf: true });

@@ -2,147 +2,83 @@
  * @category server
  * @module wrapper
  */
-const { getState } = require("@saltcorn/data/db/state");
-const db = require("@saltcorn/data/db");
-const { ul, li, h3, div, small } = require("@saltcorn/markup/tags");
-const { renderForm, link } = require("@saltcorn/markup");
-const renderLayout = require("@saltcorn/markup/layout");
-
+import { getState } from "@saltcorn/data/db/state";
+import { get_extra_menu } from "@saltcorn/data/web-mobile-commons";
+//const db = require("@saltcorn/data/db");
+import { h3, div, small, domReady } from "@saltcorn/markup/tags";
+import { renderForm, link } from "@saltcorn/markup";
+import renderLayout from "@saltcorn/markup/layout";
+import { isPushEnabled } from "@saltcorn/data/utils";
+/**
+ * get flashes
+ * @param req
+ * @returns {T[]}
+ */
 const getFlashes = (req) =>
-  ["error", "success", "danger", "warning"]
+  ["error", "success", "danger", "warning", "information"]
     .map((type) => {
       return { type, msg: req.flash(type) };
     })
     .filter((a) => a.msg && a.msg.length && a.msg.length > 0);
+/**
+ * Get menu
+ * @param req
+ * @returns {(false|{section: *, items}|{section: *, items: [{link: string, icon: string, label: *},{link: string, icon: string, label: *},{link: string, icon: string, label: *},{icon: string, subitems: [{link: string, icon: string, label: *},{link: string, icon: string, label: *},{link: string, icon: string, altlinks: string[], label: *},{link: string, altlinks: string[], icon: string, label: *},{link: string, icon: string, label: *},null], label: *}]}|{section: *, isUser: boolean, items: ([{icon: string, subitems: [{label: *},{icon: string, link: string, label: *},{link: string, icon: string, label: *}], label: *, isUser: boolean}]|*[])})[]}
+ */
+const get_menu = (req) => {
+  const isAuth = req.user && req.user.id;
+  const state = getState();
+  const role = (req.user || {}).role_id || 100;
 
-const get_extra_menu = (role, state, req) => {
-  const cfg = getState().getConfig("menu_items", []);
   const locale = req.getLocale();
   const __ = (s) => state.i18n.__({ phrase: s, locale }) || s;
-  const transform = (items) =>
-    items
-      .filter((item) => role <= +item.min_role)
-      .map((item) => ({
-        label: __(item.label),
-        icon: item.icon,
-        location: item.location,
-        style: item.style || "",
-        link:
-          item.type === "Link"
-            ? item.url
-            : item.type === "View"
-            ? `/view/${encodeURIComponent(item.viewname)}`
-            : item.type === "Page"
-            ? `/page/${encodeURIComponent(item.pagename)}`
-            : undefined,
-        ...(item.subitems ? { subitems: transform(item.subitems) } : {}),
-      }));
-  return transform(cfg);
-};
-
-const get_menu = (req) => {
-  const isAuth = req.isAuthenticated();
-  const state = getState();
-  const role = (req.user || {}).role_id || 10;
-
-  const allow_signup = state.getConfig("allow_signup");
-  const login_menu = state.getConfig("login_menu");
-  const extra_menu = get_extra_menu(role, state, req);
-  const authItems = isAuth
-    ? [
-        {
-          label: req.__("User"),
-          icon: "far fa-user",
-          isUser: true,
-          subitems: [
-            { label: small((req.user.email || "").split("@")[0]) },
-            {
-              label: req.__("User Settings"),
-              icon: "fas fa-user-cog",
-
-              link: "/auth/settings",
-            },
-            {
-              link: "/auth/logout",
-              icon: "fas fa-sign-out-alt",
-              label: req.__("Logout"),
-            },
-          ],
-        },
-      ]
-    : [
-        ...(allow_signup
-          ? [{ link: "/auth/signup", label: req.__("Sign up") }]
-          : []),
-        ...(login_menu
-          ? [{ link: "/auth/login", label: req.__("Login") }]
-          : []),
-      ];
-  const schema = db.getTenantSchema();
-  const isAdmin = role === 1;
-  const adminItems = [
-    { link: "/table", icon: "fas fa-table", label: req.__("Tables") },
-    { link: "/viewedit", icon: "far fa-eye", label: req.__("Views") },
-    { link: "/pageedit", icon: "far fa-file", label: req.__("Pages") },
-    {
-      label: req.__("Settings"),
-      icon: "fas fa-wrench",
-      subitems: [
-        {
-          link: "/admin",
-          icon: "fas fa-tools",
-          label: req.__("About application"),
-        },
-        { link: "/plugins", icon: "fas fa-plug", label: req.__("Plugins") },
-        {
-          link: "/useradmin",
-          icon: "fas fa-users-cog",
-          altlinks: ["/roleadmin"],
-          label: req.__("Users and security"),
-        },
-        {
-          link: "/site-structure",
-          altlinks: [
-            "/menu",
-            "/search/config",
-            "/library/list",
-            "/tenant/list",
-          ],
-          icon: "fas fa-compass",
-          label: req.__("Site structure"),
-        },
-        { link: "/files", icon: "far fa-images", label: req.__("Files") },
-        {
-          link: "/events",
-          altlinks: ["/actions", "/eventlog", "/crashlog"],
-          icon: "fas fa-calendar-check",
-          label: req.__("Events"),
-        },
-      ],
-    },
-  ];
-
-  const menu = [
+  const extra_menu_all = get_extra_menu(
+    role,
+    __,
+    req.user || { role_id: 100 },
+    locale,
+    req
+  );
+  const extra_menu = extra_menu_all.filter((item) => !item.isUser);
+  const user_menu = extra_menu_all.filter((item) => item.isUser);
+  // return menu
+  return [
     extra_menu.length > 0 && {
       section: req.__("Menu"),
       items: extra_menu,
     },
-    isAdmin && {
-      section: req.__("Admin"),
-      items: adminItems,
-    },
-    {
-      section: req.__("User"),
-      isUser: true,
-      items: authItems,
-    },
+    ...(user_menu.length
+      ? [
+          {
+            section: req.__("User"),
+            isUser: true,
+            items: user_menu,
+          },
+        ]
+      : []),
   ].filter((s) => s);
-  return menu;
 };
-
+/**
+ * Get Headers
+ * @param req
+ * @param version_tag
+ * @param description
+ * @param extras
+ * @returns {*[]}
+ */
 const get_headers = (req, version_tag, description, extras = []) => {
   const state = getState();
   const favicon = state.getConfig("favicon_id", null);
+  const notification_in_menu = JSON.stringify(
+    state.getConfig("menu_items", [])
+  ).includes('"Notifications');
+  const pwa_enabled = state.getConfig("pwa_enabled");
+  const push_notify_enabled = state.getConfig("enable_push_notify", false);
+  const dynamic_updates_enabled = state.getConfig(
+    "enable_dynamic_updates",
+    true
+  );
+  const is_root = req.user?.role_id === 1;
 
   const iconHeader = favicon
     ? [
@@ -158,38 +94,154 @@ const get_headers = (req, version_tag, description, extras = []) => {
         },
       ]
     : [];
+  const locale = req.getLocale();
   const stdHeaders = [
     {
-      headerTag: `<script>var _sc_globalCsrf = "${req.csrfToken()}"; var _sc_version_tag = "${version_tag}";</script>`,
+      headerTag: `<script>var _sc_loglevel = ${
+        state.logLevel
+      }, _sc_globalCsrf = "${req.csrfToken()}", _sc_version_tag = "${version_tag}"${
+        locale ? `, _sc_locale = "${locale}"` : ""
+      }, _sc_lightmode = ${JSON.stringify(
+        state.getLightDarkMode?.(req.user) || "light"
+      )}, _sc_pageloadtag = Math.floor(Math.random() * 16777215).toString(16)${req?.user?.role_id === 1 ? `, _sc_is_admin = true` : ""};</script>`,
     },
     { css: `/static_assets/${version_tag}/saltcorn.css` },
+    { script: `/static_assets/${version_tag}/saltcorn-common.js` },
     { script: `/static_assets/${version_tag}/saltcorn.js` },
+    { script: `/static_assets/${version_tag}/dayjs.min.js` },
   ];
+  if (dynamic_updates_enabled) {
+    stdHeaders.push({
+      script: `/static_assets/${version_tag}/socket.io.min.js`,
+    });
+  }
+  if (locale !== "en") {
+    stdHeaders.push({
+      script: `/static_assets/${version_tag}/dayjslocales/${locale}.js`,
+    });
+  }
   let from_cfg = [];
   if (state.getConfig("page_custom_css", ""))
     from_cfg.push({ style: state.getConfig("page_custom_css", "") });
-  if (state.getConfig("page_custom_html", ""))
-    from_cfg.push({ headerTag: state.getConfig("page_custom_html", "") });
+  const customHtml = state.getConfig("page_custom_html", "");
+  // Validity is checked on save (routes/utils.ts), not on every render.
+  if (customHtml && state.getConfig("page_custom_html_valid", true))
+    from_cfg.push({ headerTag: customHtml });
+  if (state.getConfig("log_client_errors", false))
+    from_cfg.push({ scriptBody: `enable_error_catcher()` });
+  if (state.getConfig("suppress_toasts", false))
+    from_cfg.push({ scriptBody: `_sc_suppress_toasts = true;` });
+  const state_headers = [];
+  const assets_by_role = state.assets_by_role || {};
+  const roleHeaders = assets_by_role[req.user?.role_id || 100];
+  if (roleHeaders && roleHeaders.length) {
+    for (const h of roleHeaders) {
+      if (!h.only_if || h.only_if(req) === true) state_headers.push(h);
+    }
+  } else {
+    for (const hs of Object.values(state.headers)) {
+      for (const h of hs) {
+        if (!h.only_if || h.only_if(req) === true) state_headers.push(h);
+      }
+    }
+  }
 
+  if (notification_in_menu)
+    from_cfg.push({ scriptBody: domReady(`check_saltcorn_notifications()`) });
+  if (pwa_enabled) {
+    from_cfg.push({
+      headerTag: `<link rel="manifest" href="/notifications/manifest.json${
+        is_root ? new Date().valueOf() : ""
+      }">`,
+    });
+  }
+  if (pwa_enabled || (push_notify_enabled && req.user?.id)) {
+    from_cfg.push({
+      scriptBody: `if('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/serviceworker.js', { scope: '/' });
+      }`,
+    });
+  }
+  if (push_notify_enabled && req.user?.id) {
+    const allSubs = getState().getConfig("push_notification_subscriptions", {});
+    const userSubs = allSubs[req.user.id];
+    const userEnabled = !!userSubs || isPushEnabled(req.user);
+    const vapidPublicKey = getState().getConfig("vapid_public_key");
+    const userEndpoints = userSubs ? userSubs.map((sub) => sub.endpoint) : [];
+    from_cfg.push({
+      scriptBody: `var push_notify_cfg = ${JSON.stringify({
+        enabled: true,
+        userEnabled: userEnabled,
+        vapidPublicKey,
+        endpoints: userEndpoints,
+      })}`,
+    });
+  }
+  from_cfg.push({
+    scriptBody: `var dynamic_updates_cfg = ${JSON.stringify({
+      enabled: dynamic_updates_enabled,
+    })}`,
+  });
   return [
     ...stdHeaders,
     ...iconHeader,
     ...meta_description,
-    ...state.headers,
+    ...state_headers,
     ...extras,
     ...from_cfg,
   ];
 };
-const get_brand = (state) => {
+/**
+ * Get brand
+ * @param state
+ * @returns {{name: *, logo: (string|undefined)}}
+ */
+const get_brand = (state, req) => {
   const logo_id = state.getConfig("site_logo_id", "");
+  const locale = req.getLocale();
+  const __ = (s) => state.i18n.__({ phrase: s, locale }) || s;
+  const name = __(state.getConfig("site_name", "Saltcorn"));
   return {
-    name: state.getConfig("site_name"),
+    name,
     logo: logo_id && logo_id !== "0" ? `/files/serve/${logo_id}` : undefined,
   };
 };
-module.exports = (version_tag) =>
+/**
+ * Collect keyboard shortcuts from menu items
+ * @param {object[]} menu_sections
+ * @returns {object[]} array of {shortcut, link, type}
+ */
+const collect_menu_shortcuts = (menu_sections) => {
+  const shortcuts = [];
+  const extract = (items) => {
+    for (const item of items || []) {
+      if (item.shortcut && item.link) {
+        shortcuts.push({
+          shortcut: item.shortcut,
+          link: item.link,
+          type: item.type,
+        });
+      }
+      if (item.subitems) extract(item.subitems);
+    }
+  };
+  if (menu_sections) {
+    for (const section of menu_sections) {
+      extract(section.items || []);
+    }
+  }
+  return shortcuts;
+};
+
+export default (version_tag) =>
+  /**
+   *
+   * @param req
+   * @param res
+   * @param next
+   */
   function (req, res, next) {
-    const role = (req.user || {}).role_id || 10;
+    const role = (req.user || {}).role_id || 100;
 
     res.sendAuthWrap = function (title, form, authLinks, ...html) {
       const state = getState();
@@ -202,7 +254,7 @@ module.exports = (version_tag) =>
             form,
             authLinks,
             afterForm: html.length === 1 ? html[0] : html.join(""),
-            brand: get_brand(state),
+            brand: get_brand(state, req),
             menu: get_menu(req),
             alerts: getFlashes(req),
             headers: get_headers(req, version_tag),
@@ -212,7 +264,7 @@ module.exports = (version_tag) =>
           })
         );
       } else {
-        var links = [];
+        let links = [];
         if (authLinks.login)
           links.push(
             link(authLinks.login, req.__("Already have an account? Login"))
@@ -232,27 +284,39 @@ module.exports = (version_tag) =>
         res.send(
           layout.wrap({
             title,
-            brand: get_brand(state),
+            brand: get_brand(state, req),
             menu: get_menu(req),
             currentUrl,
+            originalUrl: req.originalUrl,
             alerts: getFlashes(req),
             body,
             headers: get_headers(req, version_tag),
             role,
             req,
+            bodyClass: "auth",
           })
         );
       }
     };
     res.sendWrap = function (opts, ...html) {
       const title = typeof opts === "string" ? opts : opts.title;
+      const bodyClass = opts.bodyClass || "";
       const alerts = getFlashes(req);
       const state = getState();
       const layout = state.getLayout(req.user);
+      const no_menu = opts.no_menu;
 
       if (req.xhr) {
         const renderToHtml = layout.renderBody
-          ? (h, role) => layout.renderBody({ title, body: h, role, alerts })
+          ? (h, role, req) =>
+              layout.renderBody({
+                title,
+                body: h,
+                role,
+                alerts,
+                req,
+                hints: layout.hints,
+              })
           : defaultRenderToHtml;
         res.header(
           "Cache-Control",
@@ -262,37 +326,64 @@ module.exports = (version_tag) =>
         res.set("Page-Title", encodeURIComponent(title));
         res.send(
           html.length === 1
-            ? renderToHtml(html[0], role)
-            : html.map((h) => renderToHtml(h, role)).join("")
+            ? renderToHtml(html[0], role, req)
+            : html.map((h) => renderToHtml(h, role, req)).join("")
         );
         return;
       }
       const currentUrl = req.originalUrl.split("?")[0];
 
       const pageHeaders = typeof opts === "string" ? [] : opts.headers;
-
+      const menu = no_menu ? undefined : get_menu(req);
+      const shortcuts = collect_menu_shortcuts(menu);
+      const shortcutHeaders =
+        shortcuts.length > 0
+          ? [
+              {
+                scriptBody: `var _sc_menu_shortcuts = ${JSON.stringify(shortcuts)};`,
+              },
+            ]
+          : [];
+      if (req.user)
+        res.header(
+          "Cache-Control",
+          "private, no-cache, no-store, must-revalidate"
+        );
       res.send(
         layout.wrap({
           title,
-          brand: get_brand(state),
-          menu: get_menu(req),
+          brand: no_menu ? undefined : get_brand(state, req),
+          menu,
           currentUrl,
+          originalUrl: req.originalUrl,
+          requestFluidLayout:
+            typeof opts === "string" ? false : opts.requestFluidLayout,
           alerts,
           body: html.length === 1 ? html[0] : html.join(""),
-          headers: get_headers(req, version_tag, opts.description, pageHeaders),
+          headers: get_headers(req, version_tag, opts.description, [
+            ...(pageHeaders || []),
+            ...shortcutHeaders,
+          ]),
           role,
           req,
+          bodyClass,
         })
       );
     };
     next();
   };
-
-const defaultRenderToHtml = (s, role) =>
+/**
+ * Default render to HTML
+ * @param s
+ * @param role
+ * @returns {string|string|*}
+ */
+const defaultRenderToHtml = (s, role, req) =>
   typeof s === "string"
     ? s
     : renderLayout({
         blockDispatch: {},
         role,
+        req,
         layout: s,
       });

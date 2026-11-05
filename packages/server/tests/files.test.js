@@ -1,32 +1,133 @@
-const request = require("supertest");
-const getApp = require("../app");
-const {
+import { fileURLToPath as __fileURLToPath } from "url";
+import { dirname as __pathDirname } from "path";
+const __filename = __fileURLToPath(import.meta.url);
+const __dirname = __pathDirname(__filename);
+import { request as request } from "../auth/testhelp.js";
+import getApp from "../app.js";
+import {
   getStaffLoginCookie,
   getAdminLoginCookie,
   toRedirect,
   itShouldRedirectUnauthToLogin,
   toInclude,
   toSucceed,
-  toNotInclude,
   resetToFixtures,
-} = require("../auth/testhelp");
-const db = require("@saltcorn/data/db");
-const fs = require("fs").promises;
-const File = require("@saltcorn/data/models/file");
-const Field = require("@saltcorn/data/models/field");
-const Table = require("@saltcorn/data/models/table");
-const View = require("@saltcorn/data/models/view");
-const { table } = require("console");
+  toSucceedWithImage,
+  respondJsonWith,
+} from "../auth/testhelp.js";
+import db from "@saltcorn/data/db";
+import { promises as fs } from "fs";
+import path from "path";
+import File from "@saltcorn/data/models/file";
+import Zip from "adm-zip";
+import Field from "@saltcorn/data/models/field";
+import Table from "@saltcorn/data/models/table";
+import View from "@saltcorn/data/models/view";
+import { existsSync } from "fs";
+import { getState } from "@saltcorn/data/db/state";
+
+const createTestFile = async (
+  folder,
+  name,
+  mimetype,
+  content,
+  minRole = 100
+) => {
+  const fullPath = path.join(
+    db.connectObj.file_store,
+    db.getTenantSchema(),
+    folder,
+    name
+  );
+  if (existsSync(fullPath)) await fs.unlink(fullPath);
+  await File.from_contents(name, mimetype, content, 1, minRole, folder);
+};
+
+const checkFiles = (files, expecteds) =>
+  files.length >= expecteds.length &&
+  expecteds.every(({ filename, location }) =>
+    files.find(
+      (file) => file.filename === filename && file.location === location
+    )
+  );
 
 beforeAll(async () => {
   await resetToFixtures();
-  const mv = async (fnm) => {
-    await fs.writeFile(fnm, "nevergonnagiveyouup");
-  };
+  await File.ensure_file_store();
   await File.from_req_files(
-    { mimetype: "image/png", name: "rick.png", mv, size: 245752 },
+    {
+      mimetype: "image/png",
+      name: "rick.png",
+      mv: async (fnm) => {
+        await fs.writeFile(fnm, "nevergonnagiveyouup");
+      },
+      size: 245752,
+    },
     1,
-    4
+    40
+  );
+  await File.from_req_files(
+    {
+      mimetype: "image/png",
+      name: "large-image.png",
+      mv: async (fnm) => {
+        await fs.copyFile(
+          path.join(
+            __dirname,
+            "..",
+            "..",
+            "tests",
+            "assets",
+            "large-image.png"
+          ),
+          fnm
+        );
+      },
+      size: 219422,
+    },
+    1,
+    100
+  );
+
+  await File.new_folder(path.join("_sc_test_subfolder_one", "subsubfolder"));
+  await createTestFile(
+    "_sc_test_subfolder_one",
+    "foo_image.png",
+    "image/png",
+    "imagecontent"
+  );
+  await createTestFile(
+    "_sc_test_subfolder_one",
+    "bar_image.png",
+    "image/png",
+    "imagecontent"
+  );
+  await createTestFile(
+    path.join("_sc_test_subfolder_one", "subsubfolder"),
+    "bar_image.png",
+    "image/png",
+    "imagecontent"
+  );
+  await File.new_folder("_sc_test_subfolder_two");
+  await createTestFile(
+    "_sc_test_subfolder_two",
+    "foo_image.png",
+    "image/png",
+    "imagecontent"
+  );
+  await createTestFile(
+    "_sc_test_subfolder_one",
+    "the-script.js",
+    "application/javascript",
+    "console.log('I am a script');",
+    1
+  );
+  await createTestFile(
+    "/",
+    "malicious.svg",
+    "image/svg+xml",
+    `<svg xmlns="http://www.w3.org/2000/svg"><script>alert('XSS')</script><circle cx="50" cy="50" r="40"/></svg>`,
+    100
   );
 });
 afterAll(db.close);
@@ -39,22 +140,13 @@ describe("files admin", () => {
     await request(app)
       .get("/files")
       .set("Cookie", loginCookie)
-      .expect(toInclude("Size (KiB)"));
+      .expect(toInclude("Upload file"));
   });
   it("download file", async () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getStaffLoginCookie();
     await request(app)
-      .get("/files/download/2")
-      .set("Cookie", loginCookie)
-      .expect(toSucceed());
-  });
-
-  it("serve file", async () => {
-    const app = await getApp({ disableCsrf: true });
-    const loginCookie = await getStaffLoginCookie();
-    await request(app)
-      .get("/files/serve/2")
+      .get("/files/download/rick.png")
       .set("Cookie", loginCookie)
       .expect(toSucceed());
   });
@@ -71,38 +163,116 @@ describe("files admin", () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getStaffLoginCookie();
     await request(app)
-      .get("/files/serve/22")
+      .get("/files/serve/missingfile.foo")
       .set("Cookie", loginCookie)
       .expect(404);
   });
   it("not serve file to public", async () => {
     const app = await getApp({ disableCsrf: true });
-    await request(app).get("/files/serve/2").expect(toRedirect("/"));
+    await request(app).get("/files/serve/rick.png").expect(404);
+  });
+  it("serve public file", async () => {
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .get("/files/serve/large-image.png")
+      .expect(toSucceedWithImage({ lengthIs: (bs) => bs === 219422 }));
+  });
+  it("serve resized file", async () => {
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .get("/files/resize/200/100/large-image.png")
+      .expect(
+        toSucceedWithImage({ lengthIs: (bs) => bs < 100000 && bs > 2000 })
+      );
+  });
+  it("sanitize SVG served via /files/resize (XSS bypass)", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const res = await request(app).get("/files/resize/0/0/malicious.svg");
+    expect(res.status).toBe(200);
+    const body = res.text || Buffer.from(res.body).toString();
+    // The resize endpoint must also sanitize SVG files, just like /files/serve does.
+    // Without this, an attacker can bypass DOMPurify by requesting an SVG via
+    // /files/resize/0/0/path.svg (width=0 makes it serve the original file).
+    expect(body).not.toContain("<script>");
+  });
+  it("serve resized file without height", async () => {
+    const app = await getApp({ disableCsrf: true });
+    await request(app)
+      .get("/files/resize/200/0/large-image.png")
+      .expect(
+        toSucceedWithImage({ lengthIs: (bs) => bs < 100000 && bs > 2000 })
+      );
   });
   it("not download file to public", async () => {
     const app = await getApp({ disableCsrf: true });
-    await request(app).get("/files/download/2").expect(toRedirect("/"));
+    await request(app).get("/files/download/rick.png").expect(404);
+  });
+  it("downloads selected files as a zip", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+    // the archive is streamed to the browser as it is built, so what arrives
+    // has to be a complete, readable zip
+    const res = await request(app)
+      .post("/files/download-zip")
+      .set("Cookie", loginCookie)
+      .send({ files: ["rick.png"], location: "." })
+      .expect(toSucceed());
+    const zip = new Zip(res.body);
+    expect(zip.getEntries().map((e) => e.entryName)).toEqual(["rick.png"]);
+    expect(zip.readFile("rick.png").toString()).toBe("nevergonnagiveyouup");
+  });
+  it("leaves a file the user may not read out of the zip", async () => {
+    await File.from_req_files(
+      {
+        mimetype: "image/png",
+        name: "adminonly.png",
+        mv: async (fnm) => {
+          await fs.writeFile(fnm, "for admin eyes only");
+        },
+        size: 19,
+      },
+      1,
+      1
+    );
+    // staff (role 40) may manage files here, and may read rick.png, but
+    // adminonly.png is readable from role 1 only
+    await getState().setConfig("min_role_edit_files", 40);
+    try {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getStaffLoginCookie();
+      const res = await request(app)
+        .post("/files/download-zip")
+        .set("Cookie", loginCookie)
+        .send({ files: ["rick.png", "adminonly.png"], location: "." })
+        .expect(toSucceed());
+      expect(new Zip(res.body).getEntries().map((e) => e.entryName)).toEqual([
+        "rick.png",
+      ]);
+    } finally {
+      await getState().setConfig("min_role_edit_files", 1);
+      await (await File.findOne("adminonly.png")).delete();
+    }
   });
   it("set file min role", async () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     await request(app)
-      .post("/files/setrole/2")
+      .post("/files/setrole/rick.png")
       .set("Cookie", loginCookie)
-      .send("role=10")
-      .expect(toRedirect("/files"));
+      .send("role=100")
+      .expect(toRedirect("/files?dir=."));
   });
   it("serve file to public after role change", async () => {
     const app = await getApp({ disableCsrf: true });
-    await request(app).get("/files/serve/2").expect(toSucceed());
+    await request(app).get("/files/serve/rick.png").expect(toSucceed());
   });
   it("delete file", async () => {
     const app = await getApp({ disableCsrf: true });
     const loginCookie = await getAdminLoginCookie();
     await request(app)
-      .post("/files/delete/2")
+      .post("/files/delete/rick.png")
       .set("Cookie", loginCookie)
-      .expect(toRedirect("/files"));
+      .expect(toRedirect("/files?dir=."));
   });
   it("upload file", async () => {
     const app = await getApp({ disableCsrf: true });
@@ -112,12 +282,177 @@ describe("files admin", () => {
       .set("Cookie", loginCookie)
       .attach("file", Buffer.from("helloiamasmallfile", "utf-8"))
 
-      .expect(toRedirect("/files"));
+      .expect(toRedirect("/files?dir=."));
+  });
+  describe("file editor", () => {
+    it("opens the file editor", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .get(
+          `/files/edit/${encodeURIComponent("_sc_test_subfolder_one/the-script.js")}`
+        )
+        .set("Cookie", loginCookie)
+        .expect(toInclude("console.log(&#39;I am a script&#39;)"));
+    });
+    it("allows editing and saving a file", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post(
+          `/files/edit/${encodeURIComponent("_sc_test_subfolder_one/the-script.js")}`
+        )
+        .set("Cookie", loginCookie)
+        .send("value=console.log('I have been edited');")
+        .expect(toRedirect("/files?dir=_sc_test_subfolder_one"));
+    });
+
+    it("does not open for non-existing files", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .get(
+          `/files/edit/${encodeURIComponent("_sc_test_subfolder_one/not-existing.js")}`
+        )
+        .set("Cookie", loginCookie)
+        .expect(toInclude("Not found", 404));
+    });
+    it("denies editing non-existing files", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post(
+          `/files/edit/${encodeURIComponent("_sc_test_subfolder_one/not-existing.js")}`
+        )
+        .set("Cookie", loginCookie)
+        .send("value=console.log('I have been edited');")
+        .expect(toRedirect("/files"));
+      await request(app)
+        .get("/files")
+        .set("Cookie", loginCookie)
+        .expect(toInclude("File not found"));
+    });
+
+    it("denies access to the file editor", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getStaffLoginCookie();
+      await request(app)
+        .get(
+          `/files/edit/${encodeURIComponent("_sc_test_subfolder_one/the-script.js")}`
+        )
+        .set("Cookie", loginCookie)
+        .expect(toRedirect("/"));
+    });
+    it("denies editing a file", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getStaffLoginCookie();
+      await request(app)
+        .post(
+          `/files/edit/${encodeURIComponent("_sc_test_subfolder_one/the-script.js")}`
+        )
+        .set("Cookie", loginCookie)
+        .send("value=console.log('I have been edited');")
+        .expect(toRedirect("/"));
+    });
+
+    it("does not open for folders or not editable extensions", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .get(`/files/edit/${encodeURIComponent("_sc_test_subfolder_one")}`)
+        .set("Cookie", loginCookie)
+        .expect(toInclude("Directories cannot be edited", 400));
+      await request(app)
+        .get(
+          `/files/edit/${encodeURIComponent("_sc_test_subfolder_one/bar_image.png")}`
+        )
+        .set("Cookie", loginCookie)
+        .expect(toInclude("Files of this type cannot be edited", 400));
+    });
+  });
+  it("search files by name", async () => {
+    const app = await getApp({ disableCsrf: true });
+    const loginCookie = await getAdminLoginCookie();
+
+    const searchTestHelper = async (dir, search, expected) => {
+      await request(app)
+        .get("/files")
+        .query({ dir, search })
+        .set("X-Requested-With", "XMLHttpRequest")
+        .set("Cookie", loginCookie)
+        .expect(
+          respondJsonWith(200, (data) => checkFiles(data.files, expected))
+        );
+    };
+
+    await searchTestHelper("/", "foo", [
+      {
+        filename: "foo_image.png",
+        location: path.join("_sc_test_subfolder_one", "foo_image.png"),
+      },
+      {
+        filename: "foo_image.png",
+        location: path.join("_sc_test_subfolder_two", "foo_image.png"),
+      },
+    ]);
+    await searchTestHelper("_sc_test_subfolder_two", "foo", [
+      {
+        filename: "foo_image.png",
+        location: path.join("_sc_test_subfolder_two", "foo_image.png"),
+      },
+      {
+        filename: "..",
+        location: "",
+      },
+    ]);
+    await searchTestHelper("/", "bar", [
+      {
+        filename: "bar_image.png",
+        location: path.join("_sc_test_subfolder_one", "bar_image.png"),
+      },
+      {
+        filename: "bar_image.png",
+        location: path.join(
+          "_sc_test_subfolder_one",
+          "subsubfolder",
+          "bar_image.png"
+        ),
+      },
+    ]);
+    await searchTestHelper(
+      path.join("_sc_test_subfolder_one", "subsubfolder"),
+      "foo",
+      [
+        {
+          filename: "..",
+          location: "_sc_test_subfolder_one",
+        },
+      ]
+    );
+    await searchTestHelper(
+      path.join("_sc_test_subfolder_one", "subsubfolder"),
+      "bar",
+      [
+        {
+          filename: "..",
+          location: "_sc_test_subfolder_one",
+        },
+        {
+          filename: "bar_image.png",
+          location: path.join(
+            "_sc_test_subfolder_one",
+            "subsubfolder",
+            "bar_image.png"
+          ),
+        },
+      ]
+    );
   });
 });
 describe("files edit", () => {
   it("creates table and view", async () => {
     const table = await Table.create("thefiletable");
+    await table.update({ min_role_read: 80, min_role_write: 80 });
     await Field.create({
       table,
       name: "first_name",
@@ -138,7 +473,7 @@ describe("files edit", () => {
         columns: [
           { type: "Field", field_name: "mugshot", fieldview: "upload" },
           { type: "Field", field_name: "first_name", fieldview: "edit" },
-          { type: "Action", action_name: "Save", minRole: 10 },
+          { type: "Action", action_name: "Save", minRole: 100 },
         ],
         layout: {
           above: [
@@ -155,7 +490,7 @@ describe("files edit", () => {
           ],
         },
       },
-      min_role: 10,
+      min_role: 100,
     });
   });
   it("shows edit view", async () => {
@@ -185,9 +520,122 @@ describe("files edit", () => {
       .expect(toRedirect("/"));
   });
   it("has file", async () => {
-    const table = await Table.findOne({ name: "thefiletable" });
+    const table = Table.findOne({ name: "thefiletable" });
     const row = await table.getRow({ first_name: "elvis" });
     const file = await File.findOne({ id: row.mugshot });
     expect(!!file).toBe(true);
+  });
+});
+
+describe("visible_entries test", () => {
+  const setRole = async (role, entry) => {
+    const app = await getApp({ disableCsrf: true });
+    const adminCookie = await getAdminLoginCookie();
+    await request(app)
+      .post(`/files/setrole/${entry}`)
+      .set("Cookie", adminCookie)
+      .send(`role=${role}`)
+      .expect(toRedirect("/files?dir=_sc_test_subfolder_one"));
+  };
+  const setDirRole = async (role, entry) => {
+    const app = await getApp({ disableCsrf: true });
+    const adminCookie = await getAdminLoginCookie();
+    await request(app)
+      .post(`/files/setrole/${entry}`)
+      .set("Cookie", adminCookie)
+      .send(`role=${role}`)
+      .expect(toRedirect("/files?dir=."));
+  };
+
+  it("shows allowed files", async () => {
+    await getState().setConfig("min_role_edit_files", 40);
+    await setRole(100, path.join("_sc_test_subfolder_one", "foo_image.png"));
+    await setDirRole(100, "_sc_test_subfolder_one");
+
+    const app = await getApp({ disableCsrf: true });
+    const staffCookie = await getStaffLoginCookie();
+    await request(app)
+      .get("/files/visible_entries?dir=_sc_test_subfolder_one")
+      .set("Cookie", staffCookie)
+      .expect(
+        respondJsonWith(200, (data) =>
+          checkFiles(data.files, [
+            {
+              filename: "foo_image.png",
+              location: path.join("_sc_test_subfolder_one", "foo_image.png"),
+            },
+            {
+              filename: "bar_image.png",
+              location: path.join("_sc_test_subfolder_one", "bar_image.png"),
+            },
+          ])
+        )
+      );
+  });
+
+  it("shows no disallowed files", async () => {
+    await setRole(1, path.join("_sc_test_subfolder_one", "foo_image.png"));
+    const app = await getApp({ disableCsrf: true });
+    const staffCookie = await getStaffLoginCookie();
+    const resp = await request(app)
+      .get("/files/visible_entries?dir=_sc_test_subfolder_one")
+      .set("Cookie", staffCookie);
+    expect(resp.statusCode).toBe(200);
+    const files = resp.body.files;
+    expect(
+      files.find((file) => file.filename === "foo_image.png")
+    ).toBeUndefined();
+  });
+
+  it("shows allowed directories", async () => {
+    const dir = path.join("_sc_test_subfolder_one", "subsubfolder");
+    await setRole(80, dir);
+    const app = await getApp({ disableCsrf: true });
+    const staffCookie = await getStaffLoginCookie();
+    const resp = await request(app)
+      .get(`/files/visible_entries?dir=${dir}`)
+      .set("Cookie", staffCookie);
+    expect(resp.statusCode).toBe(200);
+    expect(
+      resp.body.directories.find(
+        (file) => file.filename === "_sc_test_subfolder_one/subsubfolder"
+      )
+    ).toBeDefined();
+  });
+
+  it("shows no disallowed directories", async () => {
+    const dir = path.join("_sc_test_subfolder_one", "subsubfolder");
+    await setRole(1, dir);
+    const app = await getApp({ disableCsrf: true });
+    const staffCookie = await getStaffLoginCookie();
+    const resp = await request(app)
+      .get(`/files/visible_entries?dir=${dir}`)
+      .set("Cookie", staffCookie);
+    expect(resp.statusCode).toBe(200);
+    const body = resp.body;
+    expect(body.files.length).toBe(0);
+    expect(body.directories.length).toBe(0);
+  });
+
+  it("should not crash on regex special characters in file_exts (CVE: regex injection)", async () => {
+    // The file_exts parameter is passed directly to new RegExp() without escaping.
+    // Regex metacharacters like ( [ cause SyntaxError → 500 Internal Server Error.
+    // This also enables ReDoS: patterns like (a+)+b cause exponential CPU usage.
+    // Confirmed: a file with 30 repeated chars + backtracking regex → 3.6s,
+    //            35 chars → 112s. The endpoint should escape regex metacharacters
+    //            or use literal string matching, not raw user input in new RegExp().
+    const app = await getApp({ disableCsrf: true });
+    const adminCookie = await getAdminLoginCookie();
+    await getState().setConfig("min_role_edit_files", 1);
+    const resp = await request(app)
+      .get(
+        "/files/visible_entries?dir=_sc_test_subfolder_one&file_exts=" +
+          encodeURIComponent("([")
+      )
+      .set("Cookie", adminCookie);
+    // Should return 200 with valid JSON, not crash with 500
+    expect(resp.statusCode).toBe(200);
+    expect(resp.body).toBeDefined();
+    expect(resp.body.files).toBeDefined();
   });
 });

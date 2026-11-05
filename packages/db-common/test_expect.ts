@@ -1,0 +1,661 @@
+/**
+ * jest-compatible test helpers backed by node:test / node:assert, so test
+ * suites can run on node's built-in test runner without a jest dependency.
+ * Lives in db-common so it can be shared across packages, e.g.:
+ *   import { describe, it, expect, beforeAll, jest } from "@saltcorn/db-common/test_expect";
+ * Only the surface used by the migrated test suites is implemented.
+ */
+import assert from "node:assert";
+import { inspect } from "node:util";
+import { createRequire } from "node:module";
+
+// This module is ESM, so the CommonJS `require` is not defined. jest.mock needs
+// to reach into the shared CommonJS module cache to mutate cached exports;
+// createRequire gives us a require bound to the same cache as the (CJS) test
+// suites that call jest.mock.
+const require = createRequire(import.meta.url);
+import {
+  describe as nodeDescribe,
+  it as nodeIt,
+  test as nodeTest,
+  before,
+  after,
+  beforeEach as nodeBeforeEach,
+  afterEach as nodeAfterEach,
+} from "node:test";
+
+// node:test names the once-per-file hooks before/after; jest calls them
+// beforeAll/afterAll. Wrap to drop jest's optional timeout 2nd argument.
+const beforeAll = (fn: any) => before(fn);
+const afterAll = (fn: any) => after(fn);
+const beforeEach = (fn: any) => nodeBeforeEach(fn);
+const afterEach = (fn: any) => nodeAfterEach(fn);
+
+// ---------------------------------------------------------------------------
+// .each() table tests
+// ---------------------------------------------------------------------------
+// jest interpolates the title with printf tokens (%s, %d, %j, ... and %# for
+// the row index) or, for object rows, with $property references.
+const eachTitle = (title: string, args: any[], index: number): string => {
+  let argIx = 0;
+  const withTokens = String(title).replace(
+    /%[sdifjoOp#%]/g,
+    (token: string) => {
+      if (token === "%%") return "%";
+      if (token === "%#") return String(index);
+      if (argIx >= args.length) return token;
+      const arg = args[argIx++];
+      switch (token) {
+        case "%s":
+          return typeof arg === "string" ? arg : inspect(arg, { depth: 3 });
+        case "%d":
+        case "%f":
+          return String(Number(arg));
+        case "%i":
+          return String(parseInt(arg, 10));
+        case "%j":
+          return JSON.stringify(arg);
+        default:
+          return inspect(arg, { depth: 3 });
+      }
+    }
+  );
+  const row = args.length === 1 ? args[0] : undefined;
+  if (row == null || typeof row !== "object") return withTokens;
+  return withTokens.replace(/\$([\w.]+)/g, (whole: string, path: string) => {
+    let value: any = row;
+    for (const key of path.split(".")) {
+      if (value == null || typeof value !== "object") return whole;
+      value = value[key];
+    }
+    return typeof value === "string" ? value : inspect(value, { depth: 3 });
+  });
+};
+
+const eachFor =
+  (runner: any) =>
+  (table: any[]) =>
+  (title: string, fn: (...args: any[]) => any, ..._rest: any[]) => {
+    table.forEach((row, index) => {
+      const args = Array.isArray(row) ? row : [row];
+      runner(eachTitle(title, args, index), () => fn(...args));
+    });
+  };
+
+// node:test's describe/it/test have no .each, and their exports cannot be
+// mutated from here (this module is ESM), so wrap them.
+const withEach = (base: any): any => {
+  const wrapped: any = (...args: any[]) => base(...args);
+  for (const key of Object.getOwnPropertyNames(base)) {
+    if (key === "length" || key === "name" || key === "prototype") continue;
+    const variant = (base as any)[key];
+    if (typeof variant === "function") {
+      const wrappedVariant: any = (...args: any[]) => variant(...args);
+      wrappedVariant.each = eachFor(variant);
+      wrapped[key] = wrappedVariant;
+    } else wrapped[key] = variant;
+  }
+  wrapped.each = eachFor(base);
+  return wrapped;
+};
+
+const describe = withEach(nodeDescribe);
+const it = withEach(nodeIt);
+const test = withEach(nodeTest);
+
+export {
+  describe,
+  it,
+  test,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  afterEach,
+};
+
+// ---------------------------------------------------------------------------
+// asymmetric matchers (expect.arrayContaining / expect.objectContaining)
+// ---------------------------------------------------------------------------
+class ArrayContaining {
+  readonly sample: any[];
+  constructor(sample: any[]) {
+    this.sample = sample;
+  }
+  matches(actual: any): boolean {
+    return (
+      Array.isArray(actual) &&
+      this.sample.every((e) => actual.some((a: any) => looseEqual(a, e)))
+    );
+  }
+}
+
+class ObjectContaining {
+  readonly sample: any;
+  constructor(sample: any) {
+    this.sample = sample;
+  }
+  matches(actual: any): boolean {
+    if (actual == null || typeof actual !== "object") return false;
+    return Object.keys(this.sample).every((k) =>
+      looseEqual(actual[k], this.sample[k])
+    );
+  }
+}
+
+// expect.any(Constructor): matches any value of the given type/instance.
+class Any {
+  readonly sample: any;
+  constructor(sample: any) {
+    this.sample = sample;
+  }
+  matches(actual: any): boolean {
+    switch (this.sample) {
+      case String:
+        return typeof actual === "string" || actual instanceof String;
+      case Number:
+        return typeof actual === "number" || actual instanceof Number;
+      case Boolean:
+        return typeof actual === "boolean";
+      case BigInt:
+        return typeof actual === "bigint";
+      case Function:
+        return typeof actual === "function";
+      case Object:
+        return actual !== null && typeof actual === "object";
+      case Array:
+        return Array.isArray(actual);
+      default:
+        return actual != null && actual instanceof this.sample;
+    }
+  }
+}
+
+const isAsymmetric = (x: any): x is ArrayContaining | ObjectContaining | Any =>
+  x instanceof ArrayContaining ||
+  x instanceof ObjectContaining ||
+  x instanceof Any;
+
+// jest's toEqual: recursive equality that ignores prototypes and treats
+// undefined-valued properties as absent.
+const looseEqual = (a: any, b: any): boolean => {
+  if (isAsymmetric(b)) return b.matches(a);
+  if (isAsymmetric(a)) return a.matches(b);
+  if (Object.is(a, b)) return true;
+  if (a == null || b == null) return a === b;
+  if (typeof a !== "object" || typeof b !== "object") return a === b;
+  if (a instanceof Date && b instanceof Date)
+    return a.getTime() === b.getTime();
+  if (a instanceof RegExp && b instanceof RegExp)
+    return a.source === b.source && a.flags === b.flags;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    return a.every((v, i) => looseEqual(v, b[i]));
+  }
+  const ak = Object.keys(a).filter((k) => a[k] !== undefined);
+  const bk = Object.keys(b).filter((k) => b[k] !== undefined);
+  if (ak.length !== bk.length) return false;
+  return ak.every(
+    (k) =>
+      Object.prototype.hasOwnProperty.call(b, k) && looseEqual(a[k], b[k])
+  );
+};
+
+// jest's toMatchObject: recursive subset match (received may have extra keys).
+const matchObject = (actual: any, expected: any): boolean => {
+  if (isAsymmetric(expected)) return expected.matches(actual);
+  if (Array.isArray(expected)) {
+    if (!Array.isArray(actual) || actual.length !== expected.length)
+      return false;
+    return expected.every((e, i) => matchObject(actual[i], e));
+  }
+  if (expected && typeof expected === "object") {
+    if (actual == null || typeof actual !== "object") return false;
+    return Object.keys(expected).every((k) =>
+      matchObject(actual[k], expected[k])
+    );
+  }
+  return Object.is(actual, expected);
+};
+
+const matchError = (error: any, expected: any): boolean => {
+  const message = error && error.message ? String(error.message) : String(error);
+  if (typeof expected === "string") return message.includes(expected);
+  if (expected instanceof RegExp) return expected.test(message);
+  if (typeof expected === "function") return error instanceof expected;
+  return true;
+};
+
+// ---------------------------------------------------------------------------
+// expect()
+// ---------------------------------------------------------------------------
+class Expectation {
+  private readonly actual: any;
+  private readonly isNot: boolean;
+
+  constructor(actual: any, isNot = false) {
+    this.actual = actual;
+    this.isNot = isNot;
+  }
+
+  get not(): Expectation {
+    return new Expectation(this.actual, !this.isNot);
+  }
+
+  get rejects(): AsyncExpectation {
+    return new AsyncExpectation(this.actual, true, this.isNot);
+  }
+
+  get resolves(): AsyncExpectation {
+    return new AsyncExpectation(this.actual, false, this.isNot);
+  }
+
+  private assertPass(pass: boolean, message: string): void {
+    assert.ok(this.isNot ? !pass : pass, message);
+  }
+
+  private show(v: any): string {
+    return inspect(v, { depth: 6 });
+  }
+
+  toBe(expected: any): void {
+    if (this.isNot) assert.notStrictEqual(this.actual, expected);
+    else assert.strictEqual(this.actual, expected);
+  }
+
+  toEqual(expected: any): void {
+    const pass = looseEqual(this.actual, expected);
+    this.assertPass(
+      pass,
+      `toEqual mismatch:\n  actual:   ${this.show(this.actual)}\n  expected: ${this.show(
+        expected
+      )}`
+    );
+  }
+
+  toStrictEqual(expected: any): void {
+    if (isAsymmetric(expected)) {
+      this.assertPass(
+        expected.matches(this.actual),
+        `toStrictEqual mismatch: ${this.show(this.actual)}`
+      );
+      return;
+    }
+    if (this.isNot) assert.notDeepStrictEqual(this.actual, expected);
+    else assert.deepStrictEqual(this.actual, expected);
+  }
+
+  toContain(expected: any): void {
+    const pass =
+      (typeof this.actual === "string" || Array.isArray(this.actual)) &&
+      this.actual.includes(expected);
+    this.assertPass(
+      pass,
+      `expected ${this.show(this.actual)} to contain ${this.show(expected)}`
+    );
+  }
+
+  toContainEqual(expected: any): void {
+    const pass =
+      Array.isArray(this.actual) &&
+      this.actual.some((x: any) => looseEqual(x, expected));
+    this.assertPass(
+      pass,
+      `expected ${this.show(this.actual)} to contain equal ${this.show(expected)}`
+    );
+  }
+
+  toMatchObject(expected: any): void {
+    this.assertPass(
+      matchObject(this.actual, expected),
+      `expected ${this.show(this.actual)} to match object ${this.show(expected)}`
+    );
+  }
+
+  toMatch(expected: RegExp | string): void {
+    const pass =
+      typeof expected === "string"
+        ? String(this.actual).includes(expected)
+        : expected.test(this.actual);
+    this.assertPass(
+      pass,
+      `expected ${this.show(String(this.actual))} to match ${expected}`
+    );
+  }
+
+  toHaveLength(length: number): void {
+    this.assertPass(
+      this.actual != null && this.actual.length === length,
+      `expected length ${this.actual?.length} to be ${length}`
+    );
+  }
+
+  toBeDefined(): void {
+    this.assertPass(this.actual !== undefined, `expected value to be defined`);
+  }
+
+  toBeUndefined(): void {
+    this.assertPass(
+      this.actual === undefined,
+      `expected ${this.show(this.actual)} to be undefined`
+    );
+  }
+
+  toBeNull(): void {
+    this.assertPass(
+      this.actual === null,
+      `expected ${this.show(this.actual)} to be null`
+    );
+  }
+
+  toBeTruthy(): void {
+    this.assertPass(!!this.actual, `expected ${this.show(this.actual)} to be truthy`);
+  }
+
+  toBeFalsy(): void {
+    this.assertPass(!this.actual, `expected ${this.show(this.actual)} to be falsy`);
+  }
+
+  toBeGreaterThan(n: number): void {
+    this.assertPass(this.actual > n, `expected ${this.show(this.actual)} > ${n}`);
+  }
+
+  toBeLessThan(n: number): void {
+    this.assertPass(this.actual < n, `expected ${this.show(this.actual)} < ${n}`);
+  }
+
+  toBeGreaterThanOrEqual(n: number): void {
+    this.assertPass(this.actual >= n, `expected ${this.show(this.actual)} >= ${n}`);
+  }
+
+  toBeLessThanOrEqual(n: number): void {
+    this.assertPass(this.actual <= n, `expected ${this.show(this.actual)} <= ${n}`);
+  }
+
+  // path is a dotted string ("a.b.0.c") or an array of keys; the expected
+  // value is optional - with no second argument only presence is checked.
+  toHaveProperty(path: string | (string | number)[], ...rest: any[]): void {
+    const keys = Array.isArray(path) ? path : String(path).split(".");
+    let value: any = this.actual;
+    let found = true;
+    for (const key of keys) {
+      if (value == null || !(String(key) in Object(value))) {
+        found = false;
+        break;
+      }
+      value = value[key as any];
+    }
+    const pass = found && (rest.length === 0 || looseEqual(value, rest[0]));
+    this.assertPass(
+      pass,
+      `expected ${this.show(this.actual)} to have property ${keys.join(".")}${
+        rest.length ? " = " + this.show(rest[0]) : ""
+      }`
+    );
+  }
+
+  toBeInstanceOf(cls: any): void {
+    this.assertPass(
+      this.actual instanceof cls,
+      `expected ${this.show(this.actual)} to be instance of ${cls?.name}`
+    );
+  }
+
+  toThrow(expected?: any): void {
+    let threw = false;
+    let error: any;
+    try {
+      if (typeof this.actual === "function") this.actual();
+    } catch (e) {
+      threw = true;
+      error = e;
+    }
+    const pass = threw && (expected === undefined || matchError(error, expected));
+    this.assertPass(pass, `expected function to throw`);
+  }
+
+  toHaveBeenCalled(): void {
+    this.assertPass(
+      (this.actual?.mock?.calls?.length ?? 0) > 0,
+      `expected mock function to have been called`
+    );
+  }
+
+  // jest alias for toHaveBeenCalled
+  toBeCalled(): void {
+    this.toHaveBeenCalled();
+  }
+
+  // args may contain asymmetric matchers (expect.objectContaining etc); the
+  // arity must match exactly, as in jest.
+  toHaveBeenCalledWith(...expected: any[]): void {
+    const calls: any[][] = this.actual?.mock?.calls ?? [];
+    this.assertPass(
+      calls.some((call) => looseEqual(call, expected)),
+      `expected mock to have been called with:\n  ${this.show(
+        expected
+      )}\nactual calls:\n  ${this.show(calls)}`
+    );
+  }
+
+  toHaveBeenLastCalledWith(...expected: any[]): void {
+    const calls: any[][] = this.actual?.mock?.calls ?? [];
+    const last = calls[calls.length - 1];
+    this.assertPass(
+      calls.length > 0 && looseEqual(last, expected),
+      `expected mock's last call to be:\n  ${this.show(
+        expected
+      )}\nactual:\n  ${this.show(last)}`
+    );
+  }
+
+  toHaveBeenCalledTimes(n: number): void {
+    const count = this.actual?.mock?.calls?.length ?? 0;
+    this.assertPass(
+      count === n,
+      `expected mock to have been called ${n} times, but was called ${count} times`
+    );
+  }
+}
+
+// async matchers via expect(promise).rejects / .resolves
+class AsyncExpectation {
+  private readonly actual: any;
+  private readonly wantReject: boolean;
+  private readonly isNot: boolean;
+
+  constructor(actual: any, wantReject: boolean, isNot: boolean) {
+    this.actual = actual;
+    this.wantReject = wantReject;
+    this.isNot = isNot;
+  }
+
+  private async settle(): Promise<{ threw: boolean; value?: any; error?: any }> {
+    try {
+      const value =
+        typeof this.actual === "function" ? await this.actual() : await this.actual;
+      return { threw: false, value };
+    } catch (error) {
+      return { threw: true, error };
+    }
+  }
+
+  private async settledExpectation(): Promise<Expectation> {
+    const { threw, value, error } = await this.settle();
+    if (this.wantReject) {
+      assert.ok(threw, `expected promise to reject, but it resolved`);
+      return new Expectation(error, this.isNot);
+    }
+    assert.ok(!threw, `expected promise to resolve, but it rejected: ${error}`);
+    return new Expectation(value, this.isNot);
+  }
+
+  async toThrow(expected?: any): Promise<void> {
+    const { threw, error } = await this.settle();
+    if (this.wantReject) {
+      const pass =
+        threw && (expected === undefined || matchError(error, expected));
+      assert.ok(
+        this.isNot ? !pass : pass,
+        `expected promise to reject${expected !== undefined ? " with " + expected : ""}`
+      );
+    } else {
+      assert.ok(!threw, `expected promise to resolve`);
+    }
+  }
+
+  async toBe(expected: any): Promise<void> {
+    (await this.settledExpectation()).toBe(expected);
+  }
+
+  async toEqual(expected: any): Promise<void> {
+    (await this.settledExpectation()).toEqual(expected);
+  }
+
+  async toStrictEqual(expected: any): Promise<void> {
+    (await this.settledExpectation()).toStrictEqual(expected);
+  }
+}
+
+interface ExpectFn {
+  (actual: any): Expectation;
+  arrayContaining: (sample: any[]) => ArrayContaining;
+  objectContaining: (sample: any) => ObjectContaining;
+  any: (sample: any) => Any;
+  assertions: (n: number) => void;
+}
+
+export const expect = ((actual: any) => new Expectation(actual)) as ExpectFn;
+expect.arrayContaining = (sample: any[]) => new ArrayContaining(sample);
+expect.objectContaining = (sample: any) => new ObjectContaining(sample);
+expect.any = (sample: any) => new Any(sample);
+// assertion-count expectation is not tracked; accepted as a no-op.
+expect.assertions = (_n: number) => {};
+
+// ---------------------------------------------------------------------------
+// jest.fn() mock functions
+// ---------------------------------------------------------------------------
+export const fn = (impl?: (...args: any[]) => any): any => {
+  const calls: any[][] = [];
+  let implementation = impl;
+  let returnValue: any;
+  let hasReturnValue = false;
+  const mockFn: any = (...args: any[]) => {
+    calls.push(args);
+    if (implementation) return implementation(...args);
+    if (hasReturnValue) return returnValue;
+    return undefined;
+  };
+  mockFn.mock = { calls };
+  mockFn.mockReturnValue = (v: any) => {
+    returnValue = v;
+    hasReturnValue = true;
+    return mockFn;
+  };
+  mockFn.mockImplementation = (f: (...args: any[]) => any) => {
+    implementation = f;
+    return mockFn;
+  };
+  mockFn.mockClear = () => {
+    calls.length = 0;
+  };
+  mockFn.mockReset = () => {
+    calls.length = 0;
+    implementation = undefined;
+    hasReturnValue = false;
+    returnValue = undefined;
+  };
+  return mockFn;
+};
+
+// jest.spyOn: wrap an object method with a mock that calls through to the
+// original by default and can be restored. Tracked so restoreAllMocks() can
+// undo every active spy.
+const activeSpies: any[] = [];
+const spyOn = (obj: any, method: string): any => {
+  const original = obj[method];
+  const spy = fn((...args: any[]) =>
+    typeof original === "function" ? original.apply(obj, args) : undefined
+  );
+  spy.mockRestore = () => {
+    obj[method] = original;
+  };
+  obj[method] = spy;
+  activeSpies.push(spy);
+  return spy;
+};
+
+// Mock a module. With a factory, the named exports it returns replace those
+// on the (shared, require-cached) module; without one, function exports are
+// auto-mocked. Mutating the cached exports means modules required afterwards
+// see the mocks - so callers should require() the system-under-test after
+// jest.mock (jest hoists mock calls above imports; node:test does not).
+//
+// require(name) must resolve from the *calling test file*, not from this
+// shared shim - otherwise mocking a package only installed for the caller's
+// own workspace fails here even though it resolves fine from the test file.
+// captureStackTrace(target, mockFn) gets that caller's frame directly, with
+// no guessing - some test setups replace global.Error with a wrapper, which
+// breaks a plain new Error() here, so we go through a real native Error.
+function mockFn(name: string, factory?: () => any) {
+  const RealError: any = new Error().constructor;
+  const origPrepare = RealError.prepareStackTrace;
+  RealError.prepareStackTrace = (_: any, stack: any) => stack;
+  const target: any = {};
+  RealError.captureStackTrace(target, mockFn);
+  const stack = target.stack as unknown as NodeJS.CallSite[];
+  RealError.prepareStackTrace = origPrepare;
+  const callerFile = stack[0]?.getFileName();
+  const scopedRequire = callerFile ? createRequire(callerFile) : require;
+  const mod = scopedRequire(name);
+  const replacement: any = factory ? factory() : autoMock(mod);
+  let mutationFailed = false;
+  for (const key of Object.keys(replacement)) {
+    try {
+      mod[key] = replacement[key];
+    } catch {
+      // non-writable export
+    }
+    if (mod[key] !== replacement[key]) mutationFailed = true;
+  }
+  // Bundled packages (esbuild/tsup output such as the `ai` package) expose
+  // their exports as getter-only, non-configurable properties, so the
+  // assignments above silently do nothing. Fall back to swapping the module's
+  // require-cache entry for a plain object, which every require() made after
+  // this call - notably the system under test - then receives. Only done when
+  // mutating in place actually failed, so modules that hold a reference to the
+  // original exports object keep seeing the mocks wherever that still works.
+  if (mutationFailed && mod && typeof mod === "object") {
+    try {
+      const entry = scopedRequire.cache[scopedRequire.resolve(name)];
+      if (entry) entry.exports = { ...mod, ...replacement };
+    } catch {
+      // not resolvable/cacheable (builtin, ESM); nothing more we can do
+    }
+  }
+}
+
+// jest.mock without a factory: replace every function export with a mock.
+const autoMock = (mod: any): any => {
+  const replacement: any = {};
+  for (const key of Object.keys(mod))
+    if (typeof mod[key] === "function") replacement[key] = fn();
+  return replacement;
+};
+
+// ---------------------------------------------------------------------------
+// jest object: setTimeout (no-op; node:test has no default timeout), fn, mock
+// ---------------------------------------------------------------------------
+export const jest = {
+  // node:test has no global default timeout, so raising it is unnecessary.
+  setTimeout: (_ms?: number) => {},
+  fn,
+  spyOn,
+  mock: mockFn,
+  clearAllMocks: () => {
+    for (const spy of activeSpies) spy.mockClear?.();
+  },
+  restoreAllMocks: () => {
+    while (activeSpies.length) activeSpies.pop().mockRestore?.();
+  },
+};

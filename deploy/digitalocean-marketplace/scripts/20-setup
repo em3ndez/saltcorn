@@ -2,12 +2,28 @@ sudo -iu postgres psql -U postgres -d template1 -c 'create extension if not exis
 sudo -iu postgres psql -U postgres -c "CREATE USER saltcorn WITH CREATEDB;"
 
 adduser --disabled-password --gecos "" saltcorn
+usermod -a -G docker saltcorn
 sudo -iu saltcorn mkdir -p /home/saltcorn/.config/
+(cd /tmp && git clone --branch v0.8.3 https://github.com/pgvector/pgvector.git && cd pgvector && make && make install)
+sudo -u postgres psql -d template1 -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'
+sudo -u postgres psql -d template1 -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+sudo -u postgres psql -d template1 -c 'CREATE EXTENSION IF NOT EXISTS postgis;'
+sudo -u postgres psql -d template1 -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm;'
+sudo -u postgres psql -d template1 -c 'CREATE EXTENSION IF NOT EXISTS citext;'
+sudo -u postgres psql -d template1 -c 'CREATE EXTENSION IF NOT EXISTS plpgsql;'
+sudo -u postgres psql -d template1 -c 'ALTER DATABASE template1 SET search_path = "$user", public, extensions;'
 sudo -iu saltcorn createdb saltcorn 
 sudo -iu postgres psql -U postgres -d saltcorn -c "ALTER SCHEMA public OWNER TO saltcorn;"
 sudo -iu postgres psql -U postgres -d saltcorn -c 'create extension if not exists "uuid-ossp";'
 sudo -iu saltcorn npm config set prefix /home/saltcorn/.local
-sudo -iu saltcorn NODE_ENV=production npm install -g @saltcorn/cli@latest --unsafe
+fallocate -l 2G /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+sudo -iu saltcorn NODE_ENV=production ATTTACH_DOCKER_IMAGE_BUILD=true npm install -g @saltcorn/cli@latest --unsafe
+sudo -iu saltcorn NODE_ENV=production npm install -g sd-notify
+swapoff /swapfile
+rm /swapfile
 echo 'export PATH=/home/saltcorn/.local/bin:$PATH' >> /home/saltcorn/.bashrc
 
 # Protect the droplet
@@ -16,6 +32,10 @@ ufw allow https
 ufw allow http
 ufw --force enable
 
+# Enable unattended upgrades
 echo -e "APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n" > /etc/apt/apt.conf.d/20auto-upgrades
 echo -e "Unattended-Upgrade::Automatic-Reboot \"true\";\n" >> /etc/apt/apt.conf.d/50unattended-upgrades
 /etc/init.d/unattended-upgrades restart
+
+# Remove DO agent
+apt-get purge -y droplet-agent

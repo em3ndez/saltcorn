@@ -1,0 +1,50 @@
+{
+  "name": "@saltcorn/common-code",
+  "version": "1.7.0-beta.4",
+  "description": "Code that can be used on both server and client",
+  "homepage": "https://saltcorn.com",
+  "scripts": {
+    "test": "cd dist && node --test",
+    "tsc": "tsc --build",
+    "clean": "tsc --build --clean"
+  },
+  "author": "Christian Hugo",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./relations/*": {
+      "types": "./dist/relations/*.d.ts",
+      "import": "./dist/relations/*.js",
+      "default": "./dist/relations/*.js"
+    },
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "import": "./dist/*.js",
+      "default": "./dist/*.js"
+    }
+  },
+  "devDependencies": {
+    "@saltcorn/db-common": "1.7.0-beta.4",
+    "@types/node": "^20.14.7"
+  },
+  "typesVersions": {
+    "*": {
+      "*": [
+        "dist/*"
+      ]
+    }
+  },
+  "files": [
+    "dist/**/*"
+  ],
+  "repository": "github:saltcorn/saltcorn",
+  "publishConfig": {
+    "access": "public"
+  }
+}

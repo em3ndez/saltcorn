@@ -19,41 +19,79 @@ const {
   img,
   footer,
   button,
+  form,
+  input,
 } = require("@saltcorn/markup/tags");
 const renderLayout = require("@saltcorn/markup/layout");
 const { renderForm, link } = require("@saltcorn/markup");
 const {
-  alert,
+  toast,
   headersInHead,
   headersInBody,
+  show_icon,
+  activeChecker,
 } = require("@saltcorn/markup/layout_utils");
 const db = require("@saltcorn/data/db");
+const { isNode } = require("@saltcorn/data/utils");
+
+const verstring = "@" + require("./package.json").version;
 
 /**
- * @param {string} currentUrl 
+ * @param {string} currentUrl
  * @returns {function}
  */
-const subItem = (currentUrl) => (item) =>
-  item.link
-    ? a(
-        {
-          class: ["collapse-item", active(currentUrl, item) && "active"],
-          href: text(item.link),
-        },
-        item.icon ? i({ class: `fa-fw mr-05 ${item.icon}` }) : "",
-        item.label
+const subItem = (currentUrl, isRTL) => (item) =>
+  item.subitems
+    ? div(
+        { class: `dropdown-item btn-group ${isRTL ? "dropstart" : "dropend"}` },
+        a(
+          {
+            type: "button",
+            class: "dropdown-item dropdown-toggle p-0",
+            "data-bs-toggle": "dropdown",
+            "aria-expanded": "false",
+          },
+          item.label
+        ),
+        ul(
+          { class: "dropdown-menu" },
+          item.subitems.map((si1) => li(subItem(currentUrl, isRTL)(si1)))
+        )
       )
-    : h6({ class: "collapse-header" }, item.label);
+    : item.link
+      ? a(
+          {
+            class: [
+              "collapse-item",
+              active(currentUrl, item) && "active",
+              item.class,
+            ],
+            href: text(item.link),
+            target: item.target_blank ? "_blank" : undefined,
+            ...(item.tooltip
+              ? {
+                  "data-bs-toggle": "tooltip",
+                  "data-bs-placement": isRTL ? "left" : "right",
+                  title: item.tooltip,
+                }
+              : {}),
+          },
+          show_icon(item.icon, "mr-05"),
+          item.label
+        )
+      : item.type === "Separator"
+        ? hr({ class: "sidebar-divider my-0" })
+        : h6({ class: "collapse-header" }, item.label);
 
 /**
- * @param {object} item 
+ * @param {object} item
  * @returns {string}
  */
 const labelToId = (item) => text(item.label.replace(" ", ""));
 
 /**
- * @param {object} x 
- * @param {object} s 
+ * @param {object} x
+ * @param {object} s
  * @returns {object}
  */
 const logit = (x, s) => {
@@ -63,40 +101,51 @@ const logit = (x, s) => {
 };
 
 /**
- * @param {string} currentUrl 
- * @param {object} item 
+ * @param {string} currentUrl
+ * @param {object} item
  * @returns {boolean}
  */
 const active = (currentUrl, item) =>
-  (item.link && currentUrl.startsWith(item.link)) ||
-  (item.altlinks && item.altlinks.some((l) => currentUrl.startsWith(l))) ||
+  (item.link && activeChecker(item.link, currentUrl)) ||
+  (item.altlinks && item.altlinks.some((l) => activeChecker(l, currentUrl))) ||
   (item.subitems &&
     item.subitems.some(
       (si) =>
-        (si.link && currentUrl.startsWith(si.link)) ||
-        (si.altlinks && si.altlinks.some((l) => currentUrl.startsWith(l)))
+        (si.link && activeChecker(si.link, currentUrl)) ||
+        (si.altlinks && si.altlinks.some((l) => activeChecker(l, currentUrl)))
     ));
 
 /**
- * @param {string} currentUrl 
+ * @param {string} currentUrl
  * @returns {function}
  */
-const sideBarItem = (currentUrl) => (item) => {
+const sideBarItem = (currentUrl, isRTL) => (item) => {
   const is_active = active(currentUrl, item);
+  if (item.type === "Separator") return hr({ class: "sidebar-divider my-0" });
   return li(
     { class: ["nav-item", is_active && "active"] },
     item.subitems
       ? [
           a(
             {
-              class: ["nav-link", !is_active && "collapsed"],
+              class: [
+                "nav-link",
+                !is_active && "collapsed",
+                item.isUser && "user-nav-section-with-span",
+              ],
               href: "#",
-              "data-toggle": "collapse",
-              "data-target": `#collapse${labelToId(item)}`,
+              "data-bs-toggle": "collapse",
+              "data-bs-target": `#collapse${labelToId(item)}`,
               "aria-expanded": "true",
               "aria-controls": `collapse${labelToId(item)}`,
+              ...(item.tooltip
+                ? {
+                    "data-bs-placement": isRTL ? "left" : "right",
+                    title: item.tooltip,
+                  }
+                : {}),
             },
-            item.icon ? i({ class: `fa-fw ${item.icon}` }) : "",
+            show_icon(item.icon),
             span(text(item.label))
           ),
           div(
@@ -107,42 +156,81 @@ const sideBarItem = (currentUrl) => (item) => {
             },
             div(
               { class: "bg-white py-2 collapse-inner rounded" },
-              item.subitems.map(subItem(currentUrl))
+              item.subitems.map(subItem(currentUrl, isRTL))
             )
           ),
         ]
       : item.link
-      ? a(
-          { class: "nav-link", href: text(item.link) },
-          item.icon ? i({ class: `fa-fw ${item.icon}` }) : "",
-          span(text(item.label))
-        )
-      : span({ class: "nav-link" }, text(item.label))
+        ? a(
+            {
+              class: "nav-link",
+              href: text(item.link),
+              target: item.target_blank ? "_blank" : undefined,
+              ...(item.tooltip
+                ? {
+                    "data-bs-toggle": "tooltip",
+                    "data-bs-placement": isRTL ? "left" : "right",
+                    title: item.tooltip,
+                  }
+                : {}),
+            },
+            show_icon(item.icon),
+            span(text(item.label))
+          )
+        : item.type === "Search"
+          ? form(
+              {
+                action: "/search",
+                class: "menusearch ms-2 me-3",
+                method: "get",
+              },
+              div(
+                { class: "input-group search-bar" },
+
+                input({
+                  type: "search",
+                  class: "form-control search-bar pl-2p5",
+                  placeholder: item.label,
+                  id: "inputq",
+                  name: "q",
+                  "aria-label": "Search",
+                  "aria-describedby": "button-search-submit",
+                }),
+
+                button(
+                  {
+                    class: "btn btn-outline-secondary search-bar",
+                    type: "submit",
+                  },
+                  i({ class: "fas fa-search" })
+                )
+              )
+            )
+          : span({ class: "nav-link" }, text(item.label))
   );
 };
 
 /**
- * @param {string} currentUrl 
+ * @param {string} currentUrl
  * @returns {function}
  */
-const sideBarSection = (currentUrl) => (section) => [
+const sideBarSection = (currentUrl, isRTL) => (section) => [
   section.section &&
     hr({ class: "sidebar-divider" }) +
       div({ class: "sidebar-heading" }, section.section),
-  section.items.map(sideBarItem(currentUrl)).join(""),
+  section.items.map(sideBarItem(currentUrl, isRTL)).join(""),
 ];
 
 /**
- * @param {object} brand 
- * @param {string[]} sections 
- * @param {string} currentUrl 
+ * @param {object} brand
+ * @param {string[]} sections
+ * @param {string} currentUrl
  * @returns {ul}
  */
-const sidebar = (brand, sections, currentUrl) =>
+const sidebar = (brand, sections, currentUrl, isRTL) =>
   ul(
     {
-      class:
-        "navbar-nav bg-gradient-primary sidebar sidebar-dark accordion d-print-none",
+      class: "navbar-nav sidebar sidebar-dark accordion d-print-none",
       id: "accordionSidebar",
     },
     a(
@@ -157,11 +245,16 @@ const sidebar = (brand, sections, currentUrl) =>
         ),
       div({ class: "sidebar-brand-text mx-3" }, brand.name)
     ),
-    sections.map(sideBarSection(currentUrl)),
+    sections.map(sideBarSection(currentUrl, isRTL)),
     hr({ class: "sidebar-divider d-none d-md-block" }),
     div(
       { class: "text-center d-none d-md-inline" },
-      button({ class: "rounded-circle border-0", id: "sidebarToggle" })
+      button({
+        class: "rounded-circle border-0",
+        "data-sidebar-toggler": true,
+        id: "sidebarToggle",
+        "aria-label": "Collapse sidebar menu",
+      })
     )
   );
 
@@ -171,7 +264,7 @@ const sidebar = (brand, sections, currentUrl) =>
  */
 const blockDispatch = {
   /**
-   * 
+   *
    * @param {object} opts
    * @param {string} opts.title
    * @param {string} opts.blurb
@@ -183,7 +276,7 @@ const blockDispatch = {
       blurb && p({ class: "mb-0 text-gray-800" }, blurb)
     ),
   /**
-   * @param {object} opts 
+   * @param {object} opts
    * @param {string} opts.contents
    * @returns {div}
    */
@@ -213,12 +306,12 @@ const blockDispatch = {
           },
           div(
             { class: "col-lg-10 align-self-end" },
-            h1({ class: "text-uppercase font-weight-bold" }, caption),
+            h1({ class: "text-uppercase fw-bold" }, caption),
             hr({ class: "divider my-4" })
           ),
           div(
             { class: "col-lg-8 align-self-baseline" },
-            p({ class: "font-weight-light mb-5" }, blurb)
+            p({ class: "fw-light mb-5" }, blurb)
             /*a(
               {
                 class: "btn btn-primary btn-xl",
@@ -233,36 +326,41 @@ const blockDispatch = {
 };
 
 /**
- * @param {string} title 
- * @param {string|object} body 
- * @param {*} role 
+ * Render body
+ * @param {string} title
+ * @param {string|object} body
+ * @param {*} role
  * @returns {string}
  */
-const renderBody = (title, body, role) =>
+const renderBody = (title, body, role, req) =>
   renderLayout({
     blockDispatch,
     role,
-    layout:
-      typeof body === "string" ? { type: "card", title, contents: body } : body,
+    req,
+    layout: body,
   });
 
-  /**
-   * @param {object} authLinks 
-   * @returns {hr|a}
-   */
-const renderAuthLinks = (authLinks) => {
-  var links = [];
+/**
+ * @param {object} authLinks
+ * @returns {hr|a}
+ */
+const renderAuthLinks = (authLinks, req) => {
+  const __ = req?.__ || ((s) => s);
+  let links = [];
   if (authLinks.login)
-    links.push(link(authLinks.login, "Already have an account? Login!"));
-  if (authLinks.forgot) links.push(link(authLinks.forgot, "Forgot password?"));
+    links.push(link(authLinks.login, __("Already have an account? Login!")));
+  if (authLinks.forgot)
+    links.push(link(authLinks.forgot, __("Forgot password?")));
   if (authLinks.signup)
-    links.push(link(authLinks.signup, "Create an account!"));
+    links.push(link(authLinks.signup, __("Create an account!")));
+  if (authLinks.publicUser)
+    links.push(link(authLinks.publicUser, __("Continue as public user")));
   const meth_links = (authLinks.methods || [])
     .map(({ url, icon, label }) =>
       a(
         { href: url, class: "btn btn-secondary btn-user btn-block" },
         icon || "",
-        `&nbsp;Login with ${label}`
+        `&nbsp;${__("Login with %s", label)}`
       )
     )
     .join("");
@@ -276,7 +374,7 @@ const renderAuthLinks = (authLinks) => {
 };
 
 /**
- * @param {Form} form 
+ * @param {Form} form
  * @returns {Form}
  */
 const formModify = (form) => {
@@ -286,42 +384,50 @@ const formModify = (form) => {
 };
 
 /**
- * @param {*} headers 
- * @param {string} title 
- * @param {string} bodyAttr 
- * @param {string} rest 
+ * omit '/' in a mobile deployment (needed for ios)
+ */
+const safeSlash = () => (isNode() ? "/" : "");
+
+const linkPrefix = () => (isNode() ? "/plugins" : "sc_plugins");
+
+/**
+ * @param {*} headers
+ * @param {string} title
+ * @param {string} bodyAttr
+ * @param {string} rest
  * @returns {string}
  */
-const wrapIt = (headers, title, bodyAttr, rest) =>
+const wrapIt = (headers, title, bodyAttr, rest, req) =>
   `<!doctype html>
-  <html lang="en">
+  <html lang="${req?.getLocale()}" ${req?.isRTL ? 'dir="rtl"' : ""}>
   <head>
     <!-- Required meta tags -->
     <meta charset="utf-8">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge"> 
     <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
-    <link rel="stylesheet" href="/plugins/pubdeps/sbadmin2/startbootstrap-sb-admin-2/4.1.4/vendor/fontawesome-free/css/all.min.css">
-    <link href="https://fonts.googleapis.com/css?family=Nunito:200,200i,300,300i,400,400i,600,600i,700,700i,800,800i,900,900i" rel="stylesheet">
+    <link rel="stylesheet" href="${linkPrefix()}/public/sbadmin2${verstring}/fontawesome-free/css/all.min.css">
+    <link href="${linkPrefix()}/public/sbadmin2${verstring}/nunito/css/nunito/nunito-fontface.css" rel="stylesheet">
 
     <!-- Custom styles for this template-->
-    <link rel="stylesheet" href="/plugins/pubdeps/sbadmin2/startbootstrap-sb-admin-2/4.1.4/css/sb-admin-2.min.css">
+    <link rel="stylesheet" href="${linkPrefix()}/public/sbadmin2${verstring}/sb-admin-2.min.css">
+    ${req?.isRTL ? `<link rel="stylesheet" href="${linkPrefix()}/public/sbadmin2${verstring}/bootstrap.rtl.min.css">` : ""}
     ${headersInHead(headers)}
     <title>${text(title)}</title>
   </head>
   <body ${bodyAttr}>
     ${rest}
-    <script src="/static_assets/${
+    <script src="${safeSlash()}static_assets/${
       db.connectObj.version_tag
     }/jquery-3.6.0.min.js"></script>
-            <script src="/plugins/pubdeps/sbadmin2/startbootstrap-sb-admin-2/4.1.4/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
-            <script src="/plugins/pubdeps/sbadmin2/startbootstrap-sb-admin-2/4.1.4/vendor/jquery-easing/jquery.easing.min.js"></script>
-            <script src="/plugins/pubdeps/sbadmin2/startbootstrap-sb-admin-2/4.1.4/js/sb-admin-2.min.js"></script>
+            <script src="${linkPrefix()}/public/sbadmin2${verstring}/bootstrap.bundle.min.js"></script>
+            <script src="${linkPrefix()}/public/sbadmin2${verstring}/jquery.easing.min.js"></script>
+            <script src="${linkPrefix()}/public/sbadmin2${verstring}/sb-admin-2.min.js"></script>
     ${headersInBody(headers)}
     </body>
   </html>`;
 
 /**
- * @param {object} opts 
+ * @param {object} opts
  * @param {string} opts.title
  * @param {object[]} opts.alerts
  * @param {object} opts.form
@@ -339,26 +445,28 @@ const authWrap = ({
   headers,
   csrfToken,
   authLinks,
+  bodyClass,
+  req,
 }) =>
   wrapIt(
     headers,
     title,
-    'class="bg-gradient-primary"',
+    `class="bg-gradient-primary ${bodyClass || ""}"`,
     `<div class="container">
       <div class="row justify-content-center">
         <div class="col-xl-10 col-lg-12 col-md-9">
           <div class="card o-hidden border-0 shadow-lg my-5">
-            <div class="card-body p-0">
+            <div class="card-body p-2">
               <div class="row">
                 <div class="col">
                   <div class="p-5">
-                    ${alerts.map((a) => alert(a.type, a.msg)).join("")}
+                  <div id="alerts-area">${/* deprecated */ ""}</div>
                     <div class="text-center">
                       <h1 class="h4 text-gray-900 mb-4">${title}</h1>
                     </div>
                     ${renderForm(formModify(form), csrfToken)}
-                    ${renderAuthLinks(authLinks)}
-                    ${afterForm}
+                    ${renderAuthLinks(authLinks, req)}
+                    ${afterForm ? afterForm : ""}
                   </div>
                 </div>
               </div>
@@ -366,7 +474,19 @@ const authWrap = ({
           </div>
         </div>
       </div>
-    </div>`
+      <div 
+        id="toasts-area"
+        class="toast-container position-fixed p-2 top-0 ${
+          isNode() ? "end-0" : "start-50"
+        }
+        style: "z-index: 9999;"
+        aria-live="polite" 
+        aria-atomic="true"
+      >
+        ${alerts.map((a) => toast(a.type, a.msg)).join("")}
+      </div>
+    </div>`,
+    req
   );
 
 /**
@@ -390,27 +510,39 @@ const wrap = ({
   body,
   headers,
   role,
+  bodyClass,
+  req,
 }) =>
   wrapIt(
     headers,
     title,
-    'id="page-top"',
+    `id="page-top" class="${bodyClass || ""}"`,
     `<div id="wrapper">
-      ${sidebar(brand, menu, currentUrl)}
+      ${menu && menu.length > 0 ? sidebar(brand, menu, currentUrl, req?.isRTL) : ""}
 
-      <div id="content-wrapper" class="d-flex flex-column">
+      <div id="content-wrapper" class="d-flex flex-column" style="min-width:0;overflow-x:hidden;">
         <div id="content">
-          <div id="page-inner-content" class="container-fluid px-2">
-            <div id="alerts-area">
-              ${alerts.map((a) => alert(a.type, a.msg)).join("")}
-            </div>
-            <div >
-              ${renderBody(title, body, role)}
+          <div id="page-inner-content" class="container-fluid px-2 sbadmin2-theme">
+            <div id="alerts-area">${/* deprecated */ ""}</div>
+            <div>
+              ${renderBody(title, body, role, req)}
             <div>
           </div>
         </div>
       </div>
-    </div>`
+      <div 
+        id="toasts-area"
+        class="toast-container position-fixed ${
+          isNode() ? "top-0 end-0 p-2" : "bottom-0 start-50 p-0"
+        } end-0 p-2"
+        style: "z-index: 9999; ${!isNode() ? "margin-bottom: 1.0rem" : ""}"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        ${alerts.map((a) => toast(a.type, a.msg)).join("")}
+      </div>
+    </div>`,
+    req
   );
 
 /**
@@ -421,23 +553,27 @@ const wrap = ({
  * @param {*} opts.role
  * @returns {string}
  */
-const exportRenderBody = ({ title, body, alerts, role }) =>
-  `<div id="alerts-area">
-    ${alerts.map((a) => alert(a.type, a.msg)).join("")}
-  </div>
+const exportRenderBody = ({ title, body, alerts, role, req }) =>
+  `<div id="alerts-area">${/* deprecated */ ""}</div>
   <div >
-    ${renderBody(title, body, role)}
-  <div>`;
+    ${renderBody(title, body, role, req)}
+  <div>
+  <div 
+    id="toasts-area"
+    class="toast-container position-fixed ${
+      isNode() ? "top-0 end-0 p-2" : "bottom-0 start-50 p-0"
+    }"
+    style: "z-index: 9999; ${!isNode() ? "margin-bottom: 1.0rem" : ""}"
+    aria-live="polite"
+    aria-atomic="true"
+  >
+    ${alerts.map((a) => toast(a.type, a.msg)).join("")}
+  </div>`;
 
 module.exports = {
   /** @type {number} */
   sc_plugin_api_version: 1,
-  /** @type {object} */
-  serve_dependencies: {
-    "startbootstrap-sb-admin-2": require.resolve(
-      "startbootstrap-sb-admin-2/package.json"
-    ),
-  },
+  plugin_name: "sbadmin2",
   /** @type {object} */
   layout: {
     wrap,

@@ -1,0 +1,82 @@
+#!/bin/bash
+
+set -e
+cd /saltcorn-mobile-app
+
+echo "Running as user: $(id -un 2>/dev/null || id -u)"
+
+BUILD_TYPE=$(jq -r '.buildType' saltcorn-mobile-cfg.json)
+APP_VERSION=$(jq -r '.appVersion' saltcorn-mobile-cfg.json)
+SERVER_DOMAIN=$(jq -r '.serverDomain' saltcorn-mobile-cfg.json)
+KEYSTORE_FILE=$(jq -r '.keystoreFile' saltcorn-mobile-cfg.json)
+KEYSTORE_ALIAS=$(jq -r '.keystoreAlias' saltcorn-mobile-cfg.json)
+KEYSTORE_PASSWORD=$(jq -r '.keystorePassword' saltcorn-mobile-cfg.json)
+
+echo "BUILD_TYPE: $BUILD_TYPE"
+echo "APP_VERSION: $APP_VERSION"
+echo "KEYSTORE_FILE: $KEYSTORE_FILE"
+echo "KEYSTORE_ALIAS: $KEYSTORE_ALIAS"
+#echo "KEYSTORE_PASSWORD: $KEYSTORE_PASSWORD"
+
+export JAVA_HOME=/opt/java/openjdk
+export PATH="$JAVA_HOME/bin:$PATH"
+export ANDROID_SDK_ROOT=/android_sdk
+export ANDROID_HOME=/android_sdk
+export GRADLE_HOME=/opt/gradle-8.9
+export PATH=$PATH:/opt/gradle-8.9/bin
+
+npx cap sync
+
+# gradle wrapper
+cat <<EOF > /saltcorn-mobile-app/android/gradle/wrapper/gradle-wrapper.properties
+distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=file\:/gradle-8.9-all.zip
+networkTimeout=10000
+validateDistributionUrl=true
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+EOF
+
+npm run build
+npx cap sync
+
+# copy prepopulated db
+mkdir -p /saltcorn-mobile-app/android/app/src/main/assets/public/assets/databases
+cp /saltcorn-mobile-app/www/scdb.sqlite /saltcorn-mobile-app/android/app/src/main/assets/public/assets/databases/prepopulated.db
+
+# .aab files are generated with 'npx cap build'
+if [ "$BUILD_TYPE" == "release" ]; then
+  # if KEYSTORE_FILE is not empty
+  if [ -n "$KEYSTORE_FILE" ]; then
+    echo "building signed app"
+    npx cap build android \
+      --androidreleasetype "AAB" \
+      --keystorepath "/saltcorn-mobile-app/$KEYSTORE_FILE" \
+      --keystorepass "$KEYSTORE_PASSWORD" \
+      --keystorealias "$KEYSTORE_ALIAS" \
+      --keystorealiaspass "$KEYSTORE_PASSWORD" 
+  else
+    echo "building unsigned app"
+    npx cap build android \
+      --androidreleasetype "AAB" \
+      --keystorepath "/saltcorn-mobile-app/unsecure-default-key.jks" \
+      --keystorepass "unsecurepassw" \
+      --keystorealias "unsecure-default-alias" \
+      --keystorealiaspass "unsecurepassw"
+  fi
+fi
+
+# .apk files are generated with './gradlew assembleDebug'
+# there seems to be a problem with apks generated with 'npx cap build'
+if [ "$BUILD_TYPE" == "debug" ]; then
+  echo "building debug app"
+  cd /saltcorn-mobile-app/android
+  ./gradlew assembleDebug
+fi
+
+
+# permission problem before running again
+rm -rf /saltcorn-mobile-app/node_modules
+rm -rf /saltcorn-mobile-app/android/.gradle
+chmod -R 777 /saltcorn-mobile-app/android

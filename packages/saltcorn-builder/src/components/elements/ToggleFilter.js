@@ -4,10 +4,11 @@
  * @subcategory components / elements
  */
 
-import React, { useContext, Fragment } from "react";
+import React, { Fragment, useState, useContext, useEffect } from "react";
 import { useNode } from "@craftjs/core";
+import useTranslation from "../../hooks/useTranslation";
 import optionsCtx from "../context";
-import { blockProps, BlockSetting, TextStyleRow } from "./utils";
+import { blockProps, BlockSetting, setAPropGen, buildOptions } from "./utils";
 
 export /**
  * @param {object} props
@@ -32,6 +33,7 @@ const ToggleFilter = ({
   size,
   style,
 }) => {
+  const { t } = useTranslation();
   const {
     selected,
     connectors: { connect, drag },
@@ -43,7 +45,7 @@ const ToggleFilter = ({
       ref={(dom) => connect(drag(dom))}
     >
       <button className={`btn btn-outline-${style || "primary"} ${size}`}>
-        {label || value || preset_value || "Set label"}
+        {label || value || preset_value || t("Set label")}
       </button>
     </span>
   );
@@ -56,6 +58,7 @@ export /**
  * @subcategory components
  */
 const ToggleFilterSettings = () => {
+  const { t } = useTranslation();
   const {
     actions: { setProp },
     name,
@@ -77,32 +80,32 @@ const ToggleFilterSettings = () => {
   const options = useContext(optionsCtx);
   const field = options.fields.find((f) => f.name === name);
   const preset_options = field.preset_options;
-  const isBool = field && field.type.name === "Bool";
-  const setAProp = (key) => (e) => {
-    if (e.target) {
-      const target_value = e.target.value;
-      setProp((prop) => (prop[key] = target_value));
-    }
-  };
+  const isBool =
+    field && (field.type?.name === "Bool" || field.type === "Bool");
+  const setAProp = setAPropGen(setProp);
   return (
     <table className="w-100">
       <tbody>
         <tr>
           <td>
-            <label>Field</label>
+            <label>{t("Field")}</label>
           </td>
           <td>
             <select
               value={name}
-              className="form-control"
+              className="field form-control form-select"
               onChange={(e) => {
-                setProp((prop) => (prop.name = e.target.value));
-                const field = options.fields.find(
-                  (f) => f.name === e.target.value
-                );
-                const isBool = field && field.type.name === "Bool";
-                if (isBool) setProp((prop) => (prop.value = "on"));
-                setProp((prop) => (prop.preset_value = ""));
+                if (e?.target) {
+                  if (!e.target) return;
+                  const value = e.target.value;
+                  setProp((prop) => (prop.name = value));
+                  const field = options.fields.find((f) => f.name === value);
+                  const isBool =
+                    field &&
+                    (field.type?.name === "Bool" || field.type === "Bool");
+                  if (isBool) setProp((prop) => (prop.value = "on"));
+                  setProp((prop) => (prop.preset_value = ""));
+                }
               }}
             >
               {options.fields.map((f, ix) => (
@@ -115,23 +118,23 @@ const ToggleFilterSettings = () => {
         </tr>
         <tr>
           <td>
-            <label>Value</label>
+            <label>{t("Value")}</label>
           </td>
           <td>
             {isBool ? (
               <select
                 value={value}
-                className="w-100"
+                className="w-100 form-select"
                 onChange={setAProp("value")}
               >
-                <option value="on">True</option>
-                <option value="off">False</option>
-                <option value="?">Both</option>
+                <option value="on">{t("True")}</option>
+                <option value="off">{t("False")}</option>
+                <option value="?">{t("Both")}</option>
               </select>
             ) : (
               <input
                 value={value}
-                className="w-100"
+                className="form-control togglevalue"
                 onChange={setAProp("value")}
               />
             )}
@@ -140,12 +143,12 @@ const ToggleFilterSettings = () => {
         {preset_options && preset_options.length > 0 ? (
           <tr>
             <td>
-              <label>Preset</label>
+              <label>{t("Preset")}</label>
             </td>
             <td>
               <select
                 value={preset_value}
-                className="form-control"
+                className="form-control form-select"
                 onChange={setAProp("preset_value")}
               >
                 <option value=""></option>
@@ -160,53 +163,58 @@ const ToggleFilterSettings = () => {
         ) : null}
         <tr>
           <td>
-            <label>Label</label>
+            <label>{t("Label")}</label>
           </td>
           <td>
             <input
               value={label}
-              className="w-100"
+              className="form-control"
               onChange={setAProp("label")}
             />
           </td>
         </tr>
         <tr>
           <td>
-            <label>Button size</label>
+            <label>{t("Button size")}</label>
           </td>
           <td>
             <select
-              className="form-control"
+              className="form-control form-select"
               value={size}
               onChange={setAProp("size")}
             >
-              <option value="">Standard</option>
-              <option value="btn-lg">Large</option>
-              <option value="btn-sm">Small</option>
-              <option value="btn-block">Block</option>
-              <option value="btn-block btn-lg">Large block</option>
-              <option value="btn-block btn-sm">Small block</option>
+              <option value="">{t("Standard")}</option>
+              <option value="btn-lg">{t("Large")}</option>
+              <option value="btn-sm">{t("Small")}</option>
+              <option value="btn-block">{t("Block")}</option>
+              <option value="btn-block btn-lg">{t("Large block")}</option>
+              <option value="btn-block btn-sm">{t("Small block")}</option>
             </select>
           </td>
         </tr>
         <tr>
           <td>
-            <label>Button style</label>
+            <label>{t("Button style")}</label>
           </td>
           <td>
             <select
-              className="form-control"
+              className="form-control form-select"
               value={style}
               onChange={setAProp("style")}
             >
-              <option value="primary">Primary</option>
-              <option value="secondary">Secondary</option>
-              <option value="success">Success</option>
-              <option value="danger">Danger</option>
-              <option value="warning">Warning</option>
-              <option value="info">Info</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
+              {buildOptions(
+                [
+                  t("primary"),
+                  t("secondary"),
+                  t("success"),
+                  t("danger"),
+                  t("warning"),
+                  t("info"),
+                  t("light"),
+                  t("dark"),
+                ],
+                { valAttr: true, capitalize: true }
+              )}
             </select>
           </td>
         </tr>

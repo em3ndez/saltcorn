@@ -4,47 +4,90 @@
  * @module app
  */
 
-const express = require("express");
-const mountRoutes = require("./routes");
+import { fileURLToPath as __fileURLToPath } from "url";
+import { dirname as __pathDirname } from "path";
+const __filename = __fileURLToPath(import.meta.url);
+const __dirname = __pathDirname(__filename);
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+import express from "express";
+import mountRoutes from "./routes/index.js";
 
-const { getState, init_multi_tenant } = require("@saltcorn/data/db/state");
-const db = require("@saltcorn/data/db");
-const passport = require("passport");
-const CustomStrategy = require("passport-custom").Strategy;
-const BearerStrategy = require("passport-http-bearer");
-const User = require("@saltcorn/data/models/user");
-const File = require("@saltcorn/data/models/file");
-const flash = require("connect-flash");
-const { loadAllPlugins } = require("./load_plugins");
-const homepage = require("./routes/homepage");
-const errors = require("./errors");
-const {
-  getConfig,
-  available_languages,
-} = require("@saltcorn/data/models/config");
-const {
-  setTenant,
+import {
+  getState,
+  getRootState,
+  init_multi_tenant,
+} from "@saltcorn/data/db/state";
+import db from "@saltcorn/data/db";
+import passport from "passport";
+import { Strategy as CustomStrategy } from "passport-custom";
+import BearerStrategy from "passport-http-bearer";
+import User from "@saltcorn/data/models/user";
+import File from "@saltcorn/data/models/file";
+import flash from "connect-flash";
+import Plugin from "@saltcorn/data/models/plugin";
+import homepage from "./routes/homepage.js";
+import errors from "./errors.js";
+import { getConfig, available_languages } from "@saltcorn/data/models/config";
+import {
   get_base_url,
   error_catcher,
   getSessionStore,
-} = require("./routes/utils.js");
-const path = require("path");
-const fileUpload = require("express-fileupload");
-const helmet = require("helmet");
-const wrapper = require("./wrapper");
-const csrf = require("csurf");
-const { I18n } = require("i18n");
-const { h1 } = require("@saltcorn/markup/tags");
-const is = require("contractis/is");
-const Trigger = require("@saltcorn/data/models/trigger");
+  setTenant,
+  applyUserLocale,
+  rejectTenantDrift,
+  dropTenantDriftUser,
+} from "./routes/utils.js";
+import _am_tenant from "@saltcorn/admin-models/models/tenant";
+const { getAllTenants, eachTenant } = _am_tenant;
+import path from "path";
+import helmet from "helmet";
+import wrapper from "./wrapper.js";
+import csrf from "@dr.pogodin/csurf";
+import { I18n } from "i18n";
+import { h1 } from "@saltcorn/markup/tags";
+import Trigger from "@saltcorn/data/models/trigger";
+import s3storage from "./s3storage.js";
+import { Strategy as TotpStrategy } from "passport-totp";
+import cors from "cors";
+import api from "./routes/api.js";
+import scapi from "./routes/scapi.js";
+import fs from "fs";
+import PluginRoutesHandler from "./plugin_routes_handler.js";
+import compression from "compression";
 
 const locales = Object.keys(available_languages);
-// i18n configuration
-const i18n = new I18n({
-  locales,
-  directory: path.join(__dirname, "locales"),
-});
-// todo console.log app instance info when app starts - avoid to show secrets (password, etc)
+
+// Fixed origins the mobile app's WebView loads its content from - the same
+// for every build, so it's safe to grant them credentialed CORS.
+// Compared case-insensitively below, and the iOS entry is lowercased -
+// double check it matches once tested on a real device.
+const MOBILE_APP_ORIGINS = new Set([
+  "https://localhost", // Android
+  "saltcornmobileapp://localhost", // iOS
+]);
+
+const disabledCsurf = (req, res, next) => {
+  req.csrfToken = () => "";
+  next();
+};
+
+const noCsrfLookup = (state, pluginRoutesHandler) => {
+  const disable_csrf_routes = state.getConfig("disable_csrf_routes", "");
+  const result = new Set(
+    disable_csrf_routes
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
+
+  for (const url of pluginRoutesHandler.noCsrfUrls) {
+    result.add(url);
+  }
+  return result;
+};
+
+// todo console.log app instance info when app stxarts - avoid to show secrets (password, etc)
 
 /**
  * @param {object} [opts = {}]
@@ -57,80 +100,192 @@ const getApp = async (opts = {}) => {
   // switch on sql logging
   if (sql_log) db.set_sql_logging(); // dont override cli flag
   // load all plugins
-  await loadAllPlugins();
+  await Plugin.loadAllPlugins();
   // get development mode status
   const development_mode = getState().getConfig("development_mode", false);
   // switch on sql logging - but it was initiated before???
   if (getState().getConfig("log_sql", false)) db.set_sql_logging();
+  // for multi-tenant with localhost, we need 1 instead of the default of 2
+  if (opts.subdomainOffset) app.set("subdomain offset", opts.subdomainOffset);
 
   // https://www.npmjs.com/package/helmet
   // helmet is secure app by adding HTTP headers
-  app.use(helmet());
+
+  const cross_domain_iframe = getState().getConfig(
+    "cross_domain_iframe",
+    false
+  );
+  app.set("query parser", "extended");
+  if (getState().getConfig("force_secure_cookies", false))
+    app.set("trust proxy", 1);
+
+  const helmetOptions = {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        connectSrc: ["'self'", "data:"],
+        scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+        "script-src-attr": ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+        styleSrc: [
+          "'self'",
+          "https://fonts.googleapis.com",
+          "https://fonts.gstatic.com",
+          "'unsafe-inline'",
+        ],
+        imgSrc: ["'self'", "data:"],
+        fontSrc: ["'self'", "data:", "https://fonts.gstatic.com"],
+        "form-action": ["'self'", "javascript:"],
+      },
+    },
+    referrerPolicy: {
+      policy: ["same-origin"],
+    },
+  };
+  if (
+    getState().getConfig("content_security_policy", "Disabled") === "Disabled"
+  )
+    helmetOptions.contentSecurityPolicy = false;
+
+  if (cross_domain_iframe) helmetOptions.xFrameOptions = false;
+  app.use(helmet(helmetOptions));
+  app.use(compression());
+  // TODO ch find a better solution
+  if (getState().getConfig("cors_enabled", true)) {
+    // Only the known mobile-app origins get credentials:true - never combine
+    // that with allowing any origin, or any website could read cookie data.
+    const mobileCors = cors({
+      origin: (origin, cb) =>
+        cb(null, MOBILE_APP_ORIGINS.has((origin || "").toLowerCase())),
+      credentials: true,
+    });
+    const openCors = cors();
+    app.use((req, res, next) => {
+      if (
+        req.headers.origin &&
+        MOBILE_APP_ORIGINS.has(req.headers.origin.toLowerCase())
+      )
+        mobileCors(req, res, next);
+      else openCors(req, res, next);
+    });
+  }
+  const bodyLimit = getState().getConfig("body_limit");
   app.use(
     express.json({
-      limit: "5mb",
+      limit: bodyLimit ? `${bodyLimit}kb` : "5mb",
       verify: (req, res, buf) => {
         req.rawBody = buf;
       },
     })
   );
-  // extenetede url encoding in use
-  app.use(express.urlencoded({ limit: "5mb", extended: true }));
-
-  // add fileupload feature
-  // todo ability to configure filetmp dir - add new config / env parameter
+  const urlencodedLimit = getState().getConfig("url_encoded_limit");
+  // extended url encoding in use
   app.use(
-    fileUpload({
-      useTempFiles: true,
-      createParentPath: true,
-      tempFileDir: "/tmp/",
+    express.urlencoded({
+      limit: urlencodedLimit ? `${urlencodedLimit}kb` : "5mb",
+      extended: true,
+      parameterLimit: 50000,
     })
   );
+
   // cookies
   app.use(require("cookie-parser")());
+
+  // i18n configuration
+
+  let i18n;
+
+  if (getState().getConfig("development_mode")) {
+    // i18n configuration
+    i18n = new I18n({
+      locales,
+      directory: path.join(__dirname, "..", "locales"),
+      mustacheConfig: { disable: true },
+      defaultLocale: getState().getConfig("default_locale"),
+    });
+  } else {
+    const staticCatalog = {};
+    for (const locale of locales) {
+      staticCatalog[locale] = require(`../locales/${locale}.json`);
+    }
+
+    for (const [nm, loc] of Object.entries(getState().plugin_locations))
+      if (fs.existsSync(path.join(loc, "locales")))
+        for (const locale of locales)
+          if (fs.existsSync(path.join(loc, "locales", `${locale}.json`))) {
+            const xlations = JSON.parse(
+              fs.readFileSync(path.join(loc, "locales", `${locale}.json`))
+            );
+            Object.assign(staticCatalog[locale], xlations);
+          }
+
+    i18n = new I18n({
+      locales,
+      staticCatalog,
+      mustacheConfig: { disable: true },
+      defaultLocale: getState().getConfig("default_locale"),
+    });
+  }
+
   // i18n support
   app.use(i18n.init);
   // init multitenant mode
   if (db.is_it_multi_tenant()) {
-    await init_multi_tenant(loadAllPlugins, opts.disableMigrate);
+    const tenants = await getAllTenants();
+    await init_multi_tenant(
+      Plugin.loadAllPlugins,
+      opts.disableMigrate,
+      tenants
+    );
   }
+  const pruneSessionInterval = +getState().getConfig(
+    "prune_session_interval",
+    900
+  );
   //
   // todo ability to configure session_secret Age
-  app.use(getSessionStore());
+  app.use(getSessionStore(pruneSessionInterval));
 
+  // Bind tenant context before passport reads or trusts any session state.
+  app.use(setTenant);
   app.use(passport.initialize());
-  app.use(passport.session());
+  app.use(passport.authenticate(["session"]));
+  // The session store is shared by all tenants, so a session minted in
+  // tenant A can be replayed against tenant B's host. Treat such a session
+  // as logged out for every route, before any handler trusts req.user's role.
+  app.use(dropTenantDriftUser);
+  app.use(applyUserLocale);
   app.use(flash());
 
   //static serving
 
   //legacy
   app.use(
-    express.static(__dirname + "/public", {
-      maxAge: development_mode ? 0 : 1000 * 60 * 15,
+    express.static(path.join(__dirname, "..", "public"), {
+      maxAge: 1000 * 60 * 60 * 24,
     })
-  );
-  app.use(
-    express.static(
-      path.dirname(require.resolve("@saltcorn/builder/package.json")) + "/dist",
-      {
-        maxAge: development_mode ? 0 : 1000 * 60 * 30,
-      }
-    )
   );
 
   if (process.env.SALTCORN_SERVE_ADDITIONAL_DIR)
     app.use(
       express.static(process.env.SALTCORN_SERVE_ADDITIONAL_DIR, {
-        maxAge: development_mode ? 0 : 1000 * 60 * 15,
+        maxAge: 1000 * 60 * 60 * 24,
       })
     );
   let version_tag = db.connectObj.version_tag;
 
+  if (process.env.SALTCORN_SERVE_MOBILE_TEST_BUILD) {
+    app.use(
+      "/mobile_test_build",
+      express.static(process.env.SALTCORN_SERVE_MOBILE_TEST_BUILD, {
+        maxAge: "100d",
+      })
+    );
+  }
+
   app.use(
     `/static_assets/${version_tag}`,
-    express.static(__dirname + "/public", {
-      maxAge: development_mode ? 0 : "100d",
+    express.static(path.join(__dirname, "..", "public"), {
+      maxAge: "100d",
     })
   );
   app.use(
@@ -138,7 +293,27 @@ const getApp = async (opts = {}) => {
     express.static(
       path.dirname(require.resolve("@saltcorn/builder/package.json")) + "/dist",
       {
-        maxAge: development_mode ? 0 : "100d",
+        maxAge: "100d",
+      }
+    )
+  );
+  app.use(
+    `/static_assets/${version_tag}`,
+    express.static(
+      path.dirname(require.resolve("@saltcorn/workflow-editor/package.json")) +
+        "/dist",
+      {
+        maxAge: "100d",
+      }
+    )
+  );
+  app.use(
+    `/static_assets/${version_tag}`,
+    express.static(
+      path.dirname(require.resolve("@saltcorn/filemanager/package.json")) +
+        "/public/build",
+      {
+        maxAge: "100d",
       }
     )
   );
@@ -148,15 +323,17 @@ const getApp = async (opts = {}) => {
     new CustomStrategy((req, done) => {
       loginAttempt();
       async function loginAttempt() {
-        const { remember, _csrf, ...userobj } = req.body;
-        if (!is.objVals(is.str).check(userobj))
+        const { remember, _csrf, dest, ...userobj } = req.body || {};
+        if (!Object.values(userobj).every((v) => typeof v === "string"))
           return done(
             null,
             false,
             req.flash("danger", req.__("Incorrect user or password"))
           );
         const mu = await User.authenticate(userobj);
-        if (mu) return done(null, mu.session_object);
+        if (mu && mu._attributes.totp_enabled)
+          return done(null, { pending_user: mu.session_object });
+        else if (mu) return done(null, mu.session_object);
         else {
           const { password, ...nopw } = userobj;
           Trigger.emitEvent("LoginFailed", null, null, nopw);
@@ -177,8 +354,10 @@ const getApp = async (opts = {}) => {
     new BearerStrategy(function (token, done) {
       loginAttempt();
       async function loginAttempt() {
-        const mu = await User.findOne({ api_token: token });
-        if (mu && token && token.length > 5)
+        const mu =
+          (await User.findByApiToken(token)) ||
+          (await User.findOne({ api_token: token }));
+        if (mu && !mu.disabled && token && token.length > 5)
           return done(
             null,
             {
@@ -191,9 +370,17 @@ const getApp = async (opts = {}) => {
             { scope: "all" }
           );
         else {
-          return done(null, { role_id: 10 });
+          return done(null, { role_id: 100 });
         }
       }
+    })
+  );
+  passport.use(
+    new TotpStrategy(function (user, done) {
+      // setup function, supply key and period to done callback
+      User.findOne({ id: user.pending_user.id }).then((u) => {
+        return done(null, u._attributes.totp_key, 30);
+      });
     })
   );
   passport.serializeUser(function (user, done) {
@@ -202,27 +389,108 @@ const getApp = async (opts = {}) => {
   passport.deserializeUser(function (user, done) {
     done(null, user);
   });
+  app.use(function (req, res, next) {
+    if (req.headers["x-saltcorn-client"] === "mobile-app") {
+      req.smr = true; // saltcorn-mobile-request
+      // Only a genuine native app (a different origin from the server) needs
+      // SameSite=None+Secure - the "web" build variant runs same-origin
+      // (e.g. served from the server itself for testing), where forcing
+      // Secure would just break the cookie over plain HTTP for no reason.
+      req.mobileCrossOrigin = MOBILE_APP_ORIGINS.has(
+        (req.headers.origin || "").toLowerCase()
+      );
+      if (req.mobileCrossOrigin && req.session?.cookie) {
+        req.session.cookie.sameSite = "none";
+        req.session.cookie.secure = true;
+      }
+    }
+    if (req.headers["x-saltcorn-client"] === "react-view") {
+      req.rvr = true; // react-view-request
+    }
+    return next();
+  });
+
+  // Change into s3storage compatible selector
+  // existing fileupload middleware is moved into s3storage.js
+  app.use(s3storage.middlewareSelect);
+  app.use(s3storage.middlewareTransform);
 
   app.use(wrapper(version_tag));
+
+  const pluginRoutesHandler = new PluginRoutesHandler();
+  await eachTenant(async () => {
+    pluginRoutesHandler.initTenantRouter(
+      db.getTenantSchema(),
+      getState().plugin_routes || {}
+    );
+    getState().routesChangedCb = () => {
+      pluginRoutesHandler.initTenantRouter(
+        db.getTenantSchema(),
+        getState().plugin_routes || {}
+      );
+      noCsrf = noCsrfLookup(getRootState(), pluginRoutesHandler);
+    };
+  });
+
   const csurf = csrf();
-  if (!opts.disableCsrf)
+  let noCsrf = null;
+  if (!opts.disableCsrf) {
+    noCsrf = noCsrfLookup(getState(), pluginRoutesHandler);
     app.use(function (req, res, next) {
-      if (req.url.startsWith("/api/")) return next();
+      if (
+        [...(noCsrf || [])].some((url_prefix) =>
+          req.url.startsWith(url_prefix)
+        ) ||
+        (req.smr &&
+          (req.url.startsWith("/api/") || req.url === "/auth/signup")) ||
+        req.headers.authorization?.toLowerCase().startsWith("bearer ") ||
+        req.url === "/auth/callback/saml" ||
+        req.url.startsWith("/notifications/share-handler") ||
+        req.url.startsWith("/notifications/manifest") ||
+        (req.url.startsWith("/api/") && !req.cookies?.["connect.sid"])
+      )
+        return disabledCsurf(req, res, next);
       csurf(req, res, next);
     });
-  else
-    app.use((req, res, next) => {
-      req.csrfToken = () => "";
-      next();
-    });
+  } else 
+    app.use(disabledCsurf);
+
+  app.use("/api", api);
+  app.use("/scapi", scapi);
 
   mountRoutes(app);
   // set tenant homepage as / root
-  app.get("/", setTenant, error_catcher(homepage));
+  app.get("/", error_catcher(homepage));
+
+  app.use((req, res, next) => {
+    // req.user may have been restored from a session minted under a
+    // different tenant than the one this host resolved to - reject that
+    // drift before any plugin route callback can run with it, same guard
+    // already applied to /api and /scapi
+    rejectTenantDrift(req, res, () => {
+      const tenant = db.getTenantSchema();
+      if (!pluginRoutesHandler.tenantRouters[tenant]) {
+        // if tenant router is not initialized, try to initialize it
+        pluginRoutesHandler.initTenantRouter(
+          tenant,
+          getState().plugin_routes || {}
+        );
+        getState().routesChangedCb = () => {
+          pluginRoutesHandler.initTenantRouter(
+            tenant,
+            getState().plugin_routes || {}
+          );
+          noCsrf = noCsrfLookup(getRootState(), pluginRoutesHandler);
+        };
+      }
+      if (pluginRoutesHandler.tenantRouters[tenant])
+        pluginRoutesHandler.tenantRouters[tenant](req, res, next);
+      else next();
+    });
+  });
   // /robots.txt
   app.get(
     "/robots.txt",
-    setTenant,
     error_catcher(async (req, res) => {
       const base = get_base_url(req);
       res.set("Content-Type", "text/plain");
@@ -235,7 +503,6 @@ Sitemap: ${base}sitemap.xml
   // /sitemap.xml
   app.get(
     "/sitemap.xml",
-    setTenant,
     error_catcher(async (req, res) => {
       const base = get_base_url(req);
       res.set("Content-Type", "text/xml");
@@ -244,7 +511,7 @@ Sitemap: ${base}sitemap.xml
       const urls = [base];
       const loop_menu = (items) => {
         for (const item of items)
-          if (+item.min_role === 10 || item.subitems) {
+          if (+item.min_role === 100 || item.subitems) {
             if (item.type === "Page")
               urls.push(`${base}page/${encodeURIComponent(item.pagename)}`);
             if (item.type === "View")
@@ -274,9 +541,12 @@ Sitemap: ${base}sitemap.xml
   // file store ensure
   await File.ensure_file_store();
   // 404 handling
-  app.get("*", function (req, res) {
+  app.get("*any", function (req, res) {
     res.status(404).sendWrap(req.__("Not found"), h1(req.__("Page not found")));
   });
+
+  //prevent prototype pollution
+  delete Object.prototype.__proto__;
   return app;
 };
-module.exports = getApp;
+export default getApp;

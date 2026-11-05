@@ -1,0 +1,110 @@
+/**
+ * @category saltcorn-cli
+ * @module commands/configuration-check-backups
+ */
+const { Command, Flags, Args } = require("@oclif/core");
+const { maybe_as_tenant, init_some_tenants } = require("../common");
+
+/**
+ * ConfigurationCheckBackupsCommand Class
+ * @extends oclif.Command
+ * @category saltcorn-cli
+ */
+class ConfigurationCheckBackupsCommand extends Command {
+  static strict = false;
+  /**
+   * @returns {Promise<void>}
+   */
+  async run() {
+    const { argv, flags } = await this.parse(ConfigurationCheckBackupsCommand);
+    //await init_some_tenants(flags.tenant);
+    const {
+      runConfigurationCheck,
+    } = require("@saltcorn/admin-models/models/config-check");
+    const { mockReqRes } = require("@saltcorn/data/tests/mocks");
+    const db = require("@saltcorn/data/db");
+    const {
+      insertTenant,
+      switchToTenant,
+      deleteTenant,
+    } = require("@saltcorn/admin-models/models/tenant");
+
+    if (!db.is_it_multi_tenant()) {
+      console.error("Multitenancy not enabled");
+      this.exit(0);
+      return;
+    }
+    //db.set_sql_logging(true);
+
+    const ten = "cfgcheckbackuptenannt";
+    await deleteTenant(ten);
+    const Plugin = require("@saltcorn/data/models/plugin");
+    const { init_multi_tenant } = require("@saltcorn/data/db/state");
+    await Plugin.loadAllPlugins();
+    for (const file of argv) {
+      let hasError = false;
+      if (file.endsWith(".zip")) {
+        console.log(file);
+        //create tenant, reset schema
+        await switchToTenant(await insertTenant(ten, "", ""), "");
+        await init_multi_tenant(Plugin.loadAllPlugins, undefined, [ten]);
+
+        await db.runWithTenant(ten, async () => {
+          //restore
+          const { restore } = require("@saltcorn/admin-models/models/backup");
+          await Plugin.loadAllPlugins();
+
+          const savePlugin = (p) => Plugin.loadAndSaveNewPlugin(p);
+          const err = await restore(file, savePlugin, true);
+          if (err) {
+            console.error("Error on restoring backup: " + file);
+            console.error(err);
+            hasError = true;
+          } else {
+            const { passes, errors, pass } = await runConfigurationCheck(
+              mockReqRes.req,
+              flags.destructive,
+              flags.destructive ? require("@saltcorn/server/app") : undefined
+            );
+
+            if (!pass) {
+              console.error("Configuration error in backup file: " + file);
+
+              errors.forEach((s) => console.error(s + "\n"));
+              console.error(`FAIL - ${errors.length} checks failed`);
+              hasError = true;
+            } else console.log("Pass");
+          }
+        });
+        await deleteTenant(ten);
+        if (hasError) this.exit(1);
+      }
+    }
+
+    this.exit(0);
+  }
+}
+
+/**
+ * @type {string}
+ */
+ConfigurationCheckBackupsCommand.description = `Check configuration`;
+
+/**
+ * @type {object}
+ */
+ConfigurationCheckBackupsCommand.args = {
+  files: Args.string({
+    required: true,
+    description: "backup file to check. can be repeated, e.g. with *",
+  }),
+};
+
+ConfigurationCheckBackupsCommand.flags = {
+  destructive: Flags.boolean({
+    char: "d",
+    description: "destructive",
+  }),
+};
+
+module.exports = ConfigurationCheckBackupsCommand;

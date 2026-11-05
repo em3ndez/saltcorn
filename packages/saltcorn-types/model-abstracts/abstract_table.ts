@@ -1,0 +1,64 @@
+/**
+ * @category saltcorn-types
+ * @module model-abstracts/abstract_table
+ * @subcategory model-abstracts
+ */
+import type { AbstractField, FieldCfg } from "./abstract_field.js";
+import type { TriggerCfg } from "./abstract_trigger.js";
+import type { AbstractTag } from "./abstract_tag.js";
+
+/** A database table, with its fields and role-based read/write access. */
+export interface AbstractTable {
+  name: string;
+  id?: number;
+  ownership_field_id?: number | null;
+  ownership_formula?: string;
+  // is actually a getter
+  sql_name: string;
+  fields: AbstractField[];
+  getTags(): Promise<Array<AbstractTag>>;
+  getForeignTables(): Promise<Array<AbstractTable>>;
+  min_role_read: number;
+  min_role_write: number;
+}
+
+/** Fields required to construct a table. */
+export type TableCfg = {
+  name: string;
+  id?: number;
+  min_role_read: number;
+  min_role_write: number;
+  ownership_field_id?: number | null;
+  ownership_formula?: string;
+  versioned?: boolean;
+  has_sync_info?: boolean;
+  is_user_group?: boolean;
+  rls_enabled?: boolean;
+  description?: string;
+  fields?: FieldCfg[];
+  constraints?: any[];
+  provider_name?: string;
+  provider_cfg?: any;
+  updated_at?: Date;
+};
+
+/** A portable (import/export) representation of a {@link TableCfg}. */
+export type TablePack = {
+  triggers?: TriggerCfg[];
+  constraints?: Array<any>;
+  ownership_field_name?: string | null;
+} & TableCfg;
+
+/**
+ * Type guard for {@link AbstractTable}.
+ * @param object - the value to test
+ * @returns true if object is an {@link AbstractTable}
+ */
+export const instanceOfTable = (object: any): object is AbstractTable => {
+  return (
+    object &&
+    "name" in object &&
+    "fields" in object &&
+    Array.isArray(object.fields)
+  );
+};

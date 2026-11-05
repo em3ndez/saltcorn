@@ -1,0 +1,760 @@
+/**
+ * SQLite3 data access layer
+ * @category sqlite
+ * @module sqlite
+ */
+
+import sqlite3 from "sqlite3";
+import type { Database } from "sqlite3";
+const { verbose } = sqlite3;
+verbose();
+import { unlink } from "fs/promises";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+
+import {
+  sqlsanitize,
+  mkWhere,
+  mkSelectOptions,
+} from "@saltcorn/db-common/internal";
+
+import type {
+  Value,
+  Where,
+  SelectOptions,
+  Row,
+} from "@saltcorn/db-common/internal";
+
+import {
+  buildInsertSql,
+  mkVal,
+  doCount,
+  doDeleteWhere,
+  doListTables,
+  doListUserDefinedTables,
+  doListScTables,
+  do_add_index,
+  do_drop_index,
+  slugify,
+  withTransaction,
+  afterCommit,
+  tryCatchInTransaction,
+  openOrUseTransaction,
+  whenTransactionisFree,
+} from "@saltcorn/db-common/sqlite-commons";
+
+export {
+  slugify,
+  withTransaction,
+  afterCommit,
+  tryCatchInTransaction,
+  openOrUseTransaction,
+  whenTransactionisFree,
+};
+
+let sqliteDatabase: Database | null = null;
+let connectObj: any = null;
+let current_filepath: string;
+
+/**
+ * Initializes internals of the the sqlite module.
+ * It must be called after importing the module.
+ * @function
+ * @param {any} getConnectObject
+ */
+export const init = (getConnectObject: () => Database): void => {
+  if (!sqliteDatabase) {
+    connectObj = getConnectObject();
+    current_filepath = get_db_filepath();
+    sqliteDatabase = new sqlite3.Database(current_filepath);
+    query("PRAGMA foreign_keys = ON;");
+  }
+};
+
+/**
+ * Get sqlite path
+ * @function
+ * @returns {string|void}
+ */
+export const get_db_filepath = (): string => {
+  if (connectObj.sqlite_path) return connectObj.sqlite_path;
+  return "";
+};
+
+let log_sql_enabled = false;
+
+/**
+ * Control Logging sql statements to console
+ * @param {boolean} [val = true] - if true then log sql statements to console
+ */
+export function set_sql_logging(val: boolean = true): void {
+  log_sql_enabled = val;
+}
+
+/**
+ * Get sql logging state
+ * @returns {boolean} if true then sql logging eabled
+ */
+export function get_sql_logging(): boolean {
+  return log_sql_enabled;
+}
+
+/**
+ * Log SQL statement to console
+ * @param {string} sql - SQL statement
+ * @param {any} [vs] - any additional parameter
+ */
+export function sql_log(sql: string, vs?: Value[]) {
+  if (log_sql_enabled)
+    if (typeof vs === "undefined") console.log(sql);
+    else console.log(sql, vs);
+}
+
+/**
+ * @param {string} sql
+ * @param {any} params
+ * @returns {Promise<object>}
+ */
+export function query(sql: string, params?: Value[]): Promise<any> {
+  sql_log(sql, params);
+  return new Promise((resolve, reject) => {
+    if (!sqliteDatabase) {
+      reject(new Error("The database connection is closed."));
+      return;
+    }
+    sqliteDatabase.all(sql, params, function (err: any, rows: any) {
+      if (err) {
+        reject(err);
+      } else {
+        resolve({ rows });
+      }
+    });
+  });
+}
+
+/**
+ * Change connection (close connection and open new connection from connObj)
+ * @param {any} connObj - connection object
+ * @returns {Promise<void>}
+ * @function
+ */
+export const changeConnection = async (connObj: any): Promise<void> => {
+  if (!sqliteDatabase) {
+    throw new Error("The database connection is closed.");
+  }
+  await sqliteDatabase.close();
+  current_filepath = connObj.sqlite_path;
+  sqliteDatabase = new sqlite3.Database(current_filepath);
+};
+
+/**
+ * start a transaction
+ * just an equivalent for the pg function
+ */
+export const begin = async () => {
+  await query(`BEGIN`);
+};
+
+/**
+ * commit a transaction
+ * just an equivalent for the pg function
+ */
+export const commit = async () => {
+  await query(`COMMIT`);
+};
+
+/**
+ * rollback a
+ * just an equivalent for the pg function
+ */
+export const rollback = async () => {
+  await query(`ROLLBACK`);
+};
+
+/**
+ * Close database connection
+ * @returns {Promise<void>}
+ * @function
+ */
+export const close = async (): Promise<void> => {
+  if (!sqliteDatabase) {
+    throw new Error("The database connection is closed.");
+  }
+  await sqliteDatabase.close();
+  sqliteDatabase = null;
+};
+
+/**
+ * Execute Select statement
+ * @param {string} tbl - table name
+ * @param {any} whereObj - where object
+ * @param {any} [selectopts = {}] - select options
+ * @returns {Promise<*>} return rows
+ * @function
+ */
+export const select = async (
+  tbl: string,
+  whereObj: Where | undefined,
+  selectopts: SelectOptions = {}
+): Promise<Row[]> => {
+  const { where, values } = mkWhere(whereObj, true);
+  let sql;
+
+  // NOT WORKING!! TODO Fix
+  if (selectopts.tree_field)
+    sql = `WITH RECURSIVE _tree AS (
+        SELECT ${
+          selectopts.fields
+            ? selectopts.fields.map((f) => `p."${f}"`).join(", ")
+            : `p.*`
+        }, 0 as _level
+        ${
+          selectopts.orderBy
+            ? `, printf('%08d',
+            (
+                SELECT COUNT(*)
+                FROM "${sqlsanitize(tbl)}" r
+                WHERE r."${selectopts.tree_field}" IS NULL
+                  AND r."${selectopts.orderBy}" > p."${selectopts.orderBy}"
+            )
+        ) AS sort_path`
+            : ""
+        } 
+        FROM "${sqlsanitize(tbl)}" p
+        WHERE p."${selectopts.tree_field}" IS NULL
+  
+      UNION ALL
+  
+      SELECT ${
+        selectopts.fields
+          ? selectopts.fields.map((f) => `c."${f}"`).join(", ")
+          : `c.*`
+      }, pt._level+1
+      ${
+        selectopts.orderBy
+          ? `, pt.sort_path || '.' ||
+        printf('%08d',
+            (
+                SELECT COUNT(*)
+                FROM "${sqlsanitize(tbl)}" s
+                WHERE s."${selectopts.tree_field}" = c."${selectopts.tree_field}"
+                  AND s."${selectopts.orderBy}" > c."${selectopts.orderBy}"
+            )
+        )`
+          : ""
+      } 
+      FROM "${sqlsanitize(tbl)}" c
+      JOIN _tree pt ON c."${selectopts.tree_field}" = pt.id      
+      )
+      SELECT ${
+        selectopts.fields ? selectopts.fields.join(", ") : `*`
+      }, _level FROM _tree ${where} ${mkSelectOptions(
+        selectopts.orderBy
+          ? { ...selectopts, orderBy: "_sort_path", orderDesc: false }
+          : selectopts,
+        values,
+        false
+      )}`;
+  else
+    sql = `SELECT * FROM "${sqlsanitize(tbl)}" ${where} ${mkSelectOptions(
+      selectopts,
+      values,
+      true
+    )}`;
+  const tq = await query(sql, values);
+
+  return tq.rows;
+};
+
+/**
+ *
+ * @returns
+ */
+export const listTables = async () => {
+  return await doListTables(query);
+};
+
+/**
+ *
+ * @returns
+ */
+export const listUserDefinedTables = async () => {
+  return await doListUserDefinedTables(query);
+};
+
+/**
+ *
+ * @returns
+ */
+export const listScTables = async () => {
+  return await doListScTables(query);
+};
+
+/**
+ *
+ * @param name
+ */
+export const dropTable = async (name: string) => {
+  await query(`DROP TABLE ${name}`);
+};
+
+/**
+ *
+ * @param tables
+ */
+export const dropTables = async (tables: string[]) => {
+  for (const table of tables) {
+    await dropTable(table);
+  }
+};
+
+// TODO Utility function - needs ti be moved out this module
+
+/**
+ * Drop unique constraint
+ * @param {string} tbl - table name
+ * @param {any} obj - list of column=value pairs
+ * @param {string} id - primary key column value
+ * @returns {Promise<void>} no results
+ * @function
+ */
+export const update = async (
+  tbl: string,
+  obj: Row,
+  id: string | number
+): Promise<void> => {
+  const kvs = Object.entries(obj);
+  if (kvs.length === 0) return;
+  const assigns = kvs.map(([k, v], ix) => `"${sqlsanitize(k)}"=?`).join();
+  let valList = kvs.map(([k, v]) => mkVal([k, v]));
+  valList.push(id);
+  const q = `update "${sqlsanitize(tbl)}" set ${assigns} where id=?`;
+  await query(q, valList);
+};
+
+export const updateWhere = async (
+  tbl: string,
+  obj: Row,
+  whereObj: Where | undefined
+): Promise<void> => {
+  const kvs = Object.entries(obj);
+  if (kvs.length === 0) return;
+  const { where, values } = mkWhere(whereObj, true, kvs.length);
+  const assigns = kvs.map(([k, v], ix) => `"${sqlsanitize(k)}"=?`).join();
+  let valList = [...kvs.map(([k, v]) => mkVal([k, v])), ...values];
+  const q = `update "${sqlsanitize(tbl)}" set ${assigns} ${where}`;
+  await query(q, valList);
+};
+/**
+ * Delete rows in table
+ * @param {string} tbl - table name
+ * @param {any} whereObj - where object
+ * @returns {Promise<void>} result of delete execution
+ * @function
+ */
+export const deleteWhere = async (
+  tbl: string,
+  whereObj: Where | undefined
+): Promise<void> => {
+  await doDeleteWhere(tbl, whereObj, query);
+};
+
+/**
+ * Insert rows into table
+ * @param {string} tbl - table name
+ * @param {any} obj - columns names and data
+ * @param {any} [opts = {}] - columns attributes
+ * @returns {Promise<string|void>} returns id.
+ * @function
+ */
+export const insert = async (
+  tbl: string,
+  obj: Row,
+  opts: { noid?: boolean; ignoreExisting?: boolean } = {}
+): Promise<string | void> => {
+  const { sql, valList } = buildInsertSql(tbl, obj, opts);
+  await query(sql, valList);
+  if (opts.noid) return;
+  // TBD Support of primary key column different from id
+  const ids = await query("SELECT last_insert_rowid() as id");
+  return ids.rows[0].id;
+};
+
+/**
+ * Select one record
+ * @param {string} tbl - table name
+ * @param {any} where - where object
+ * @param {any} [selectopts = {}] - select options
+ * @throws {Error}
+ * @returns {Promise<any>} return first record from sql result
+ * @function
+ */
+export const selectOne = async (
+  tbl: string,
+  where: Where,
+  selectopts: SelectOptions = {}
+): Promise<Row> => {
+  const rows = await select(tbl, where, { ...selectopts, limit: 1 });
+  if (rows.length === 0) {
+    const w = mkWhere(where, true);
+    throw new Error(`no ${tbl} ${w.where} are ${w.values}`);
+  } else return rows[0];
+};
+
+/**
+ * Select one record or null if no records
+ * @param {string} tbl - table name
+ * @param {any} where - where object
+ * @param {any} [selectopts = {}] - select options
+ * @returns {Promise<any>} - null if no record or first record data
+ * @function
+ */
+export const selectMaybeOne = async (
+  tbl: string,
+  where: Where,
+  selectopts: SelectOptions = {}
+): Promise<Row | null> => {
+  const rows = await select(tbl, where, { ...selectopts, limit: 1 });
+  if (rows.length === 0) return null;
+  else return rows[0];
+};
+
+/**
+ * Get count of rows in table
+ * @param {string} tbl - table name
+ * @param {any} whereObj - where object
+ * @returns {Promise<number>} count of tables
+ * @function
+ */
+export const count = async (
+  tbl: string,
+  whereObj: Where | undefined,
+  opts?: SelectOptions
+) => {
+  if (opts?.limit) return await doCount(tbl, whereObj, query, +opts?.limit);
+  else return await doCount(tbl, whereObj, query);
+};
+
+/**
+ * Get version of PostgreSQL
+ * @returns {Promise<string>} returns version
+ * @function
+ */
+export const getVersion = async (): Promise<string> => {
+  const sql = `SELECT sqlite_version();`;
+  sql_log(sql);
+  const tq = await query(sql);
+  return tq.rows[0]["sqlite_version()"];
+};
+
+/**
+ * Reset DB Schema using drop schema and recreate it.
+ * Attention! You will lost data after call this function!
+ * @returns {Promise<void>} no result
+ * @function
+ */
+export const drop_reset_schema = async (): Promise<void> => {
+  if (!sqliteDatabase) {
+    throw new Error("The database connection is closed.");
+  }
+  await sqliteDatabase.close();
+  await unlink(current_filepath);
+  sqliteDatabase = new sqlite3.Database(current_filepath);
+};
+
+/**
+ * Add unique constraint
+ * @param table_name - table name
+ * @param field_names - list of columns (members of constraint)
+ * @returns no result
+ */
+export const add_unique_constraint = async (
+  table_name: string,
+  field_names: string[]
+): Promise<void> => {
+  await do_add_index(table_name, field_names, query, true, sql_log);
+};
+
+/**
+ * Drop unique constraint
+ * @param table_name - table name
+ * @param field_names - list of columns (members of constraint)
+ * @returns no results
+ */
+export const drop_unique_constraint = async (
+  table_name: string,
+  field_names: string[]
+): Promise<void> => {
+  await do_drop_index(table_name, field_names, query, true, sql_log);
+};
+
+/**
+ * Add index
+ * @param table_name - table name
+ * @param field_name - column name
+ * @returns no result
+ */
+export const add_index = async (
+  table_name: string,
+  field_name: string
+): Promise<void> => {
+  await do_add_index(table_name, [field_name], query, false, sql_log);
+};
+
+/**
+ * Drop index
+ * @param table_name - table name
+ * @param field_name - column name
+ * @returns no results
+ */
+export const drop_index = async (
+  table_name: string,
+  field_name: string
+): Promise<void> => {
+  await do_drop_index(table_name, [field_name], query, false, sql_log);
+};
+
+/**
+ * SQLite is a single-file database with no schema/tenant-database concept,
+ * so tenant namespace creation/deletion is a no-op here.
+ */
+export const create_tenant_schema = async (
+  name: string,
+  ifNotExists?: boolean
+): Promise<void> => {};
+export const drop_tenant_schema = async (name: string): Promise<void> => {};
+
+/**
+ * Path of the sqlite file holding express sessions. It sits next to the
+ * application database, so that it follows the configured database rather
+ * than the process working directory (which changes between invocations, and
+ * which parallel test processes share even though their databases differ).
+ * @returns {string} path to the session database file
+ */
+export const get_session_filepath = (): string =>
+  current_filepath ? `${current_filepath}-sessions.sqlite` : "sessions.sqlite";
+
+/**
+ * Build the express-session Store backed by a local sqlite file.
+ *
+ * connect-sqlite3 (^0.9.15, but this changed between 0.9.16 and 0.9.17) no
+ * longer opens the database itself - it expects `options.db` to already be
+ * an open handle with .exec/.get/.all/.run, so we have to open it here.
+ * @param {any} session - the express-session module instance the app uses
+ * @returns {any} a session.Store instance
+ */
+export const getExpressSessionStore = (session: any): any => {
+  const SQLiteStore = require("connect-sqlite3")(session);
+  const db = new sqlite3.Database(get_session_filepath());
+  // wait rather than fail with SQLITE_BUSY if the file is locked; a failed
+  // session write silently logs the user out on their next request
+  db.run("PRAGMA busy_timeout = 10000;");
+  return new SQLiteStore({ db });
+};
+
+/**
+ * Upsert a row into _sc_config.
+ * @param {string} key
+ * @param {any} value
+ * @returns {Promise<void>} no result
+ */
+export const upsert_config = async (key: string, value: any): Promise<void> => {
+  const sql = `insert into "_sc_config"("key", value) values($key, json($value))
+                on conflict ("key") do update set value = json($value)`;
+  await query(sql, { $key: key, $value: JSON.stringify({ v: value }) } as any);
+};
+
+export const driverName = "sqlite";
+export const sql_backend_display_name = "SQLite";
+export const array_agg_sql_fn = "json_group_array";
+export const serial_pk_sql_type = "integer";
+export const json_sql_type = "json";
+export const indexable_text_sql_type = "text";
+export const timestamp_sql_type = "timestamptz";
+export const millis_timestamp_sql_type = "timestamp";
+export const supports_search_path = false;
+
+// Backend capability flags (see DbExportsType in db-common/types)
+export const supports_multiple_schemas = false;
+export const pools_connections = false;
+export const supports_for_update = false;
+export const supports_row_level_security = false;
+export const supports_alter_table = false;
+export const supports_non_integer_pk = false;
+export const json_read_returns_string = true;
+export const json_write_needs_stringify = false;
+export const stores_dates_as_text = true;
+export const supports_large_bind_lists = false;
+export const supports_database_views = false;
+export const supports_table_discovery = false;
+export const supports_session_pruning = false;
+export const supports_agg_order_by = true;
+export const coerce_numeric_aggregates_to_string = false;
+export const uses_positional_placeholders = true;
+export const coerce_read_dates = true;
+
+// SQL-expression builders (see DbExportsType in db-common/types):
+// These mirror the Postgres forms: the sync/history SQL paths were only ever
+// specialised for MySQL, so non-MySQL engines keep the original Postgres SQL.
+export const epochToTimestampSql = (param: string): string =>
+  `to_timestamp(${param})`;
+export const truncateMillisSql = (expr: string): string =>
+  `date_trunc('milliseconds', ${expr})`;
+export const castExprToTextSql = (expr: string): string => `${expr}::text`;
+export const castBindParamSql = (
+  param: string,
+  sqlType: "text" | "jsonb"
+): string => `${param}::${sqlType}`;
+
+// history-trim SQL fragments (mirror Postgres; only MySQL specialised)
+export const timeDiffWithinSql = (
+  startExpr: string,
+  endExpr: string,
+  seconds: number
+): string => `${endExpr} - ${startExpr} <= INTERVAL '${seconds} seconds'`;
+export const isDistinctFromSql = (a: string, b: string): string =>
+  `${a} IS DISTINCT FROM ${b}`;
+export const wrapDeleteSubselect = (subquery: string): string => subquery;
+
+// column DDL (mirror Postgres; only MySQL specialised)
+export const text_requires_length_for_index = false;
+export const setColumnNullabilitySql = (
+  qTable: string,
+  qCol: string,
+  _sqlType: string,
+  notNull: boolean
+): string =>
+  `alter table ${qTable} alter column ${qCol} ${
+    notNull ? "set" : "drop"
+  } not null;`;
+export const alterColumnTypeSql = (
+  qTable: string,
+  qCol: string,
+  newType: string,
+  using: string,
+  def: string
+): string =>
+  `alter table ${qTable} alter column ${qCol} TYPE ${newType} ${using} ${def};`;
+export const changePkColumnTypeStatements = (
+  qTable: string,
+  qCol: string,
+  newType: string,
+  def: string,
+  _wasAlreadyPk: boolean
+): string[] => [
+  `ALTER TABLE ${qTable} drop column ${qCol};`,
+  `ALTER TABLE ${qTable} add column ${qCol} ${newType} primary key ${def};`,
+];
+
+// foreign-key DDL (mirror Postgres; only MySQL specialised)
+export const inline_fk_in_column_type = true;
+export const fk_must_be_dropped_before_column = false;
+export const fk_deferrable_clause = "";
+export const dropForeignKeyIfExists = async (
+  qTable: string,
+  conName: string
+): Promise<void> => {
+  await query(`ALTER TABLE ${qTable} drop constraint if exists "${conName}"`);
+};
+export const replaceForeignKey = async (params: {
+  qTable: string;
+  oldConName: string;
+  newConName: string;
+  colName: string;
+  qRefTable: string;
+  refCol: string;
+  onDelete: string;
+}): Promise<void> => {
+  const { qTable, oldConName, newConName, colName, qRefTable, refCol, onDelete } =
+    params;
+  await query(
+    `ALTER TABLE ${qTable} drop constraint "${oldConName}", add constraint "${newConName}" foreign key ("${colName}") references ${qRefTable}("${refCol}")${onDelete}${fk_deferrable_clause}`
+  );
+};
+export const addColumnWithDefault = async (params: {
+  qTable: string;
+  colName: string;
+  sqlType: string;
+  bareType: string;
+  required: boolean;
+  defaultValue: any;
+}): Promise<void> => {
+  const { qTable, colName, sqlType, required, defaultValue } = params;
+  await query(
+    `alter table ${qTable} add column "${sqlsanitize(colName)}" ${sqlType} ${
+      required ? `not null default ${JSON.stringify(defaultValue)}` : ""
+    }`
+  );
+};
+export const isDuplicateForeignKeyError = (_e: any): boolean => false;
+
+// misc dialect-specific SQL / behaviour (mirror Postgres unless noted)
+export const jsonMergeExpr = (colExpr: string, param: string): string =>
+  `coalesce(${colExpr}, '{}'::jsonb) || ${param}::jsonb`;
+// no array parameters: IN-lists expand to positional placeholders
+export const supports_array_param_in = false;
+// sqlite has no server-side session store to clear
+export const deleteSessionsForUser = async (): Promise<void> => {};
+export const deleteSessionsForTenant = async (): Promise<void> => {};
+export const dropCheckConstraintIfExists = async (
+  qTable: string,
+  conName: string
+): Promise<void> => {
+  await query(`alter table ${qTable} drop constraint IF EXISTS "${conName}";`);
+};
+export const migration_sql_dialect = "sql_sqlite";
+export const migration_translates_from_pg = false;
+// discovery is unsupported on sqlite (supports_table_discovery=false); values
+// below are placeholders so the exports exist.
+export const discovery_keys_uppercase = false;
+export const discovery_columns_order_by = "";
+export const discovery_pk_sql = "";
+export const discovery_fk_sql = "";
+export const dropPrimaryKey = async (
+  schemaPrefix: string,
+  tableName: string,
+  tenantSchema: string
+): Promise<void> => {
+  const { rows } = await query(`select constraint_name
+from information_schema.table_constraints
+where table_schema = '${tenantSchema || "public"}'
+      and table_name = '${tableName}'
+      and constraint_type = 'PRIMARY KEY';`);
+  const cname = rows[0]?.constraint_name;
+  await query(
+    `alter table ${schemaPrefix}"${tableName}" drop constraint "${cname}"`
+  );
+};
+
+// Defer FK checks for the remainder of the current transaction.
+export const deferForeignKeys = async (client: {
+  query: (sql: string) => Promise<any>;
+}): Promise<void> => {
+  await client.query("PRAGMA defer_foreign_keys = ON");
+};
+
+// Pull the offending field name out of a unique-violation error message.
+// e.g. `SQLITE_CONSTRAINT: UNIQUE constraint failed: books.author`
+export const parseUniqueConstraintError = (
+  msg: string,
+  tableName: string
+): string =>
+  msg.replace(`SQLITE_CONSTRAINT: UNIQUE constraint failed: ${tableName}.`, "");
+
+// Canonical key for a multi-field unique constraint, to compare against the
+// field name parsed above. sqlite reports `books.author, books.pages`; the
+// leading `<table>.` is stripped by parseUniqueConstraintError, so only the
+// remaining fields keep the table prefix.
+export const uniqueConstraintFieldsKey = (
+  fields: string[],
+  tableName: string
+): string => {
+  const [field1, ...rest] = fields;
+  return [field1, ...rest.map((fnm) => `${tableName}.${fnm}`)].join(", ");
+};
+
+// Translate a postgresql migration to sqlite
+export const translateMigrationsFromPostgresql = (sql: string): string =>
+  sql
+    .replace("id serial primary", "id integer primary")
+    .replace("jsonb", "json");

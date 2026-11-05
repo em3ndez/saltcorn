@@ -1,25 +1,11 @@
 import requests
 from urllib.parse import urljoin
 from urllib.request import urlopen
-import time
 
 class Session:
   def __init__(self, base_url):
     self.base_url = base_url
     self.reset()
-
-  def wait_for_port_open(self):
-    i=0
-    while i<30:
-      try:
-        response = urlopen(self.base_url,timeout=1)
-        return
-      except:
-        print("Closed, retry")
-        time.sleep(0.25)
-        i=i+1
-        pass
-    raise ValueError("wait_for_port_open: Iterations exceeded")
 
   def __read_response(self, resp):
     self.status = resp.status_code
@@ -30,12 +16,26 @@ class Session:
     else:
         self.redirect_url = None
 
-  def get(self, url):
-    resp = self.session.get(urljoin(self.base_url, url), allow_redirects=False)
+  def sessionID(self):
+    cookiesDict = self.session.cookies.get_dict()
+    if 'connect.sid' in cookiesDict:
+      return self.session.cookies.get_dict()['connect.sid']
+    else:
+      return ""
+
+  def get(self, url, allow_redirects=False, timeout=30):
+    resp = self.session.get(urljoin(self.base_url, url), allow_redirects=allow_redirects, timeout=timeout)
     self.__read_response(resp)
 
-  def postForm(self, url, data):
-    resp = self.session.post(urljoin(self.base_url, url), data=data, allow_redirects=False)
+  def postForm(self, url, data, allow_redirects=False):
+    resp = self.session.post(urljoin(self.base_url, url), data=data, allow_redirects=allow_redirects)
+    self.__read_response(resp)
+
+  def apiPost(self, url, data, allow_redirects=False, extra_headers=None, csrf_token=None):
+    headers = {'Content-Type': 'application/json', **(extra_headers or {})}
+    if csrf_token:
+      headers['x-csrf-token'] = csrf_token
+    resp = self.session.post(urljoin(self.base_url, url), json=data, headers=headers, allow_redirects=allow_redirects)
     self.__read_response(resp)
 
   def follow_redirect(self):

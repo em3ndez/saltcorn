@@ -1,5 +1,16 @@
 **/node_modules
 plugin_packages/
+plugins_folder/
 git_plugins/
 Dockerfile
 Dockerfile.*
+**/Dockerfile
+**/Dockerfile.*
+whale-ci.yml
+deploy/whale-ci/
+!deploy/whale-ci/enable-ts-runtime-checks.js
+!deploy/whale-ci/trc-stack-hook.js
+deploy/docker-compose-tests/
+.git/
+cireport.html
+.github

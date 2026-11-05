@@ -1,0 +1,2063 @@
+import { request as request } from "../auth/testhelp.js";
+import getApp from "../app.js";
+import {
+  getUserLoginCookie,
+  getAdminLoginCookie,
+  resetToFixtures,
+  respondJsonWith,
+  toRedirect,
+  toInclude,
+  toSucceed,
+  resToLoginCookie,
+} from "../auth/testhelp.js";
+import db from "@saltcorn/data/db";
+import { sleep } from "@saltcorn/data/tests/mocks";
+
+import Table from "@saltcorn/data/models/table";
+import TableConstraint from "@saltcorn/data/models/table_constraints";
+import Field from "@saltcorn/data/models/field";
+import User from "@saltcorn/data/models/user";
+import Plugin from "@saltcorn/data/models/plugin";
+
+beforeAll(async () => {
+  await resetToFixtures();
+});
+afterAll(db.close);
+
+jest.setTimeout(30000);
+
+const initSyncInfo = async (tbls) => {
+  for (const tbl of tbls) {
+    const books = Table.findOne({ name: tbl });
+    if (books.has_sync_info) await db.deleteWhere(`${tbl}_sync_info`, {});
+    else {
+      books.has_sync_info = true;
+      await books.update(books);
+    }
+  }
+};
+
+const createAnswersTbl = async () => {
+  await Plugin.loadAndSaveNewPlugin(
+    new Plugin({
+      name: "json",
+      source: "npm",
+      location: "@saltcorn/json",
+      version: "latest",
+    })
+  );
+  const table = await Table.create("Answers", {
+    min_role_read: 100,
+    min_role_write: 100,
+  });
+  await Field.create({
+    table,
+    name: "answer",
+    label: "Answer",
+    type: "JSON",
+  });
+};
+
+describe("load remote insert/updates", () => {
+  if (!db.isSQLite) {
+    beforeAll(async () => {
+      await initSyncInfo(["books", "publisher", "patients"]);
+    });
+    it("check params", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          syncInfos: {
+            books: {},
+          },
+        })
+        .expect(
+          respondJsonWith(400, (resp) => resp.error === "loadUntil is missing")
+        );
+      await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: new Date().valueOf(),
+        })
+        .expect(
+          respondJsonWith(400, (resp) => resp.error === "syncInfos is missing")
+        );
+    });
+
+    it("without syncFrom", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const books = Table.findOne({ name: "books" });
+      const dbLength = await books.countRows();
+      const loadUntil = new Date();
+      const resp = await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: loadUntil.valueOf(),
+          syncInfos: {
+            books: {
+              lastModifiedAt: 0,
+            },
+          },
+        });
+      expect(resp.status).toBe(200);
+      const data = resp._body;
+      expect(data.books.rows.length).toBe(dbLength);
+      for (const row of data.books.rows) {
+        const fromDb = await books.getRows({ id: row._sync_info_tbl_ref_ });
+        expect(fromDb.length).toBe(1);
+        expect(typeof row._sync_info_tbl_last_modified_).toBe("number");
+        expect(row._sync_info_tbl_deleted_).toBe(false);
+      }
+    });
+
+    it("with syncFrom, no changes in window", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const loadUntil = new Date();
+      // syncFrom == loadUntil → empty time window → no rows
+      const resp = await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: loadUntil.valueOf(),
+          syncInfos: {
+            books: {
+              lastModifiedAt: 0,
+              syncFrom: loadUntil.valueOf(),
+            },
+          },
+        });
+      expect(resp.status).toBe(200);
+      const data = resp._body;
+      expect(data.books.rows.length).toBe(0);
+    });
+
+    it("with syncFrom, with sync_infos", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const books = Table.findOne({ name: "books" });
+      await books.updateRow({ author: "Herman Melville" }, 1);
+      await sleep(200);
+      const dbTime = await db.time();
+      await books.updateRow({ author: "Leo Tolstoy" }, 2);
+      const { last_modified } = await books.latestSyncInfo(2);
+      {
+        const resp = await request(app)
+          .post("/sync/load_changes")
+          .set("Cookie", loginCookie)
+          .send({
+            loadUntil: (await db.time()).valueOf(),
+            syncInfos: {
+              books: {
+                lastModifiedAt: 0,
+                syncFrom: dbTime.valueOf(),
+              },
+            },
+          });
+        expect(resp.status).toBe(200);
+        const data = resp._body;
+        expect(data.books.rows.length).toBe(1);
+
+        const {
+          _sync_info_tbl_ref_,
+          _sync_info_tbl_last_modified_,
+          _sync_info_tbl_deleted_,
+          ...rest
+        } = data.books.rows[0];
+        expect(Number(_sync_info_tbl_ref_)).toBe(2);
+        expect(_sync_info_tbl_last_modified_).toBe(last_modified.valueOf());
+        expect(_sync_info_tbl_deleted_).toBe(false);
+        expect(rest.author).toBe("Leo Tolstoy");
+      }
+      await books.updateRow({ author: "Herman Melville" }, 1);
+      {
+        const resp = await request(app)
+          .post("/sync/load_changes")
+          .set("Cookie", loginCookie)
+          .send({
+            loadUntil: (await db.time()).valueOf(),
+            syncInfos: {
+              books: {
+                lastModifiedAt: 0,
+                syncFrom: dbTime.valueOf(),
+              },
+            },
+          });
+        expect(resp.status).toBe(200);
+        const data = resp._body;
+        expect(data.books.rows.length).toBe(2);
+        for (const row of data.books.rows) {
+          const {
+            _sync_info_tbl_ref_,
+            _sync_info_tbl_last_modified_,
+            _sync_info_tbl_deleted_,
+            ...rest
+          } = row;
+          expect(Number(_sync_info_tbl_ref_)).toBe(rest.id);
+          const { last_modified } = await books.latestSyncInfo(rest.id);
+          expect(_sync_info_tbl_last_modified_).toBe(last_modified.valueOf());
+          expect(_sync_info_tbl_deleted_).toBe(false);
+        }
+        expect(data.books.rows[0].author).toBe("Leo Tolstoy");
+        expect(data.books.rows[1].author).toBe("Herman Melville");
+      }
+    });
+
+    it("sync table with capitals", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      // create table
+      await request(app)
+        .post("/table")
+        .set("Cookie", loginCookie)
+        .send(`name=${encodeURIComponent("Table with capitals")}`)
+        .expect(toRedirect("/table/26"));
+      // add a field
+      await request(app)
+        .post("/field/")
+        .send("stepName=Basic properties")
+        .send("name=string_field")
+        .send("label=StringField")
+        .send("type=String")
+        .send(
+          `contextEnc=${encodeURIComponent(JSON.stringify({ table_id: 26 }))}`
+        )
+        .set("Cookie", loginCookie)
+        .expect(toInclude("options"));
+      // init sync_info table
+      await request(app)
+        .post("/table")
+        .send("id=26")
+        .send("has_sync_info=on")
+        .set("Cookie", loginCookie)
+        .expect(toRedirect("/table/26"));
+      const dbTime = await db.time();
+
+      // call load changes
+      await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: (await db.time()).valueOf(),
+          syncInfos: {
+            "Table with capitals": {
+              lastModifiedAt: 0,
+              syncFrom: dbTime.valueOf(),
+            },
+          },
+        })
+        .expect(toSucceed());
+    });
+
+    it("load sync not authorized", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getUserLoginCookie();
+      const loadUntil = new Date();
+      const resp = await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: loadUntil.valueOf(),
+          syncInfos: {
+            patients: {
+              lastModifiedAt: 0,
+              syncFrom: 1000,
+            },
+          },
+        });
+      expect(resp.status).toBe(200);
+      const data = resp._body;
+      expect(Object.keys(data).length).toBe(0);
+    });
+
+    const addOwnerField = async () => {
+      const patients = Table.findOne({ name: "patients" });
+      const users = Table.findOne({ name: "users" });
+      const ownerField = await Field.create({
+        table: patients,
+        name: "owner",
+        label: "Pages",
+        type: "Key",
+        reftable: users,
+        attributes: { summary_field: "id" },
+      });
+      patients.ownership_field_id = ownerField.id;
+      await patients.update(patients);
+      const user = await User.findOne({ email: "user@foo.com" });
+      await patients.updateRow({ owner: user.id }, 1);
+    };
+
+    it("load sync authorized with ownership", async () => {
+      await addOwnerField();
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getUserLoginCookie();
+      const loadUntil = new Date();
+      const resp = await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: loadUntil.valueOf(),
+          syncInfos: {
+            patients: {
+              lastModifiedAt: 0,
+            },
+          },
+        });
+      expect(resp.status).toBe(200);
+      const data = resp._body;
+      expect(Object.keys(data).length).toBe(1);
+      expect(data.patients).toBeDefined();
+      expect(data.patients.rows.length).toBe(1);
+      expect(data.patients.rows[0].id).toBe(1);
+    });
+
+    it("load sync authorized with ownership and syncFrom", async () => {
+      const patients = Table.findOne({ name: "patients" });
+      if (!patients.ownership_field_id) await addOwnerField();
+      const rows = await patients.getRows();
+      for (const row of rows) {
+        await patients.updateRow(row, row.id);
+      }
+
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getUserLoginCookie();
+      const loadUntil = new Date();
+      const resp = await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: loadUntil.valueOf(),
+          syncInfos: {
+            patients: {
+              lastModifiedAt: 0,
+              syncFrom: 1000,
+            },
+          },
+        });
+      expect(resp.status).toBe(200);
+      const data = resp._body;
+      expect(Object.keys(data).length).toBe(1);
+      expect(data.patients).toBeDefined();
+      expect(data.patients.rows.length).toBe(1);
+      expect(data.patients.rows[0].id).toBe(1);
+    });
+  } else
+    it("only pq support", () => {
+      expect(true).toBe(true);
+    });
+});
+
+// describe("load remote deletes", () => {});
+const doUpload = async (
+  app,
+  loginCookie,
+  newSyncTimestamp,
+  oldSyncTimestamp,
+  changes
+) => {
+  const resp = await request(app)
+    .post("/sync/offline_changes")
+    .set("Cookie", loginCookie)
+    .send({
+      oldSyncTimestamp,
+      newSyncTimestamp,
+      changes,
+    });
+  return resp;
+};
+
+const getResult = async (app, loginCookie, syncDir) => {
+  let pollCount = 0;
+  while (pollCount++ < 10) {
+    const resp = await request(app)
+      .get(`/sync/upload_finished?dir_name=${encodeURIComponent(syncDir)}`)
+      .set("Cookie", loginCookie);
+    expect(resp.status).toBe(200);
+    const { finished, translatedIds, uniqueConflicts, dataConflicts, error } =
+      resp._body;
+    if (finished)
+      return translatedIds
+        ? { translatedIds, uniqueConflicts, dataConflicts }
+        : error;
+    await sleep(1000);
+  }
+  return null;
+};
+
+const cleanSyncDir = async (app, loginCookie, syncDir) => {
+  const resp = await request(app)
+    .post("/sync/clean_sync_dir")
+    .send({ dir_name: syncDir })
+    .set("Cookie", loginCookie);
+  expect(resp.status).toBe(200);
+};
+
+const maxId = async (tblName) => {
+  const table = Table.findOne({ name: tblName });
+  const pkName = table.pk_name;
+  const rows = await table.getRows({}, { orderBy: pkName, orderDesc: true });
+  return rows.length === 0 ? 0 : rows[0][pkName];
+};
+
+describe("Upload changes", () => {
+  if (!db.isSQLite) {
+    beforeAll(async () => {
+      await initSyncInfo(["books", "publisher"]);
+    });
+
+    it("inserts with translations", async () => {
+      const oldTimestamp = new Date().valueOf();
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          books: {
+            inserts: [
+              {
+                id: 1,
+                author: "app agi",
+                pages: 1,
+                publisher: 1,
+              },
+            ],
+          },
+          publisher: {
+            inserts: [
+              {
+                id: 1,
+                name: "agi",
+              },
+            ],
+          },
+        }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const { translatedIds } = await getResult(app, loginCookie, syncDir);
+      await cleanSyncDir(app, loginCookie, syncDir);
+      expect(translatedIds).toBeDefined();
+      expect(translatedIds).toEqual({
+        books: {
+          1: 3,
+        },
+        publisher: {
+          1: 3,
+        },
+      });
+    });
+
+    it("upload json", async () => {
+      const oldTimestamp = new Date().valueOf();
+      await createAnswersTbl();
+      const table = Table.findOne({ name: "Answers" });
+      expect(table).toBeDefined();
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const rows = [
+        {
+          id: 1,
+          answer: true,
+        },
+        {
+          id: 2,
+          answer: false,
+        },
+        {
+          id: 3,
+          answer: 1,
+        },
+        {
+          id: 4,
+          answer: ["latte", "americano", "filter"],
+        },
+      ];
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          Answers: {
+            inserts: rows,
+          },
+        }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const result = await getResult(app, loginCookie, syncDir);
+      expect(result).toBeDefined();
+      expect(await table.getRows()).toEqual(rows);
+    });
+
+    it("denies inserts because of TableConstraint conflicts", async () => {
+      const oldTimestamp = new Date().valueOf();
+      const books = Table.findOne({ name: "books" });
+      const oldCount = await books.countRows();
+      // unique constraint for author + pages
+      const constraint = await TableConstraint.create({
+        table: books,
+        type: "Unique",
+        configuration: {
+          fields: ["author", "pages"],
+        },
+      });
+
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          books: {
+            inserts: [
+              {
+                author: "Herman Melville",
+                pages: 967,
+                publisher: 1,
+              },
+              {
+                author: "Leo Tolstoy",
+                pages: "728",
+                publisher: 2,
+              },
+            ],
+          },
+        }
+      );
+
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const { uniqueConflicts } = await getResult(app, loginCookie, syncDir);
+      await constraint.delete();
+      await cleanSyncDir(app, loginCookie, syncDir);
+      expect(uniqueConflicts).toBeDefined();
+      expect(uniqueConflicts).toEqual({
+        books: [
+          { id: 1, author: "Herman Melville", pages: 967, publisher: null },
+          { id: 2, author: "Leo Tolstoy", pages: 728, publisher: 1 },
+        ],
+      });
+      const newCount = await books.countRows();
+      expect(newCount).toBe(oldCount);
+    });
+
+    it("denies updates because of TableConstraint conflicts", async () => {
+      const oldTimestamp = new Date().valueOf();
+      const books = Table.findOne({ name: "books" });
+      // unique constraint for author + pages
+      const constraint = await TableConstraint.create({
+        table: books,
+        type: "Unique",
+        configuration: {
+          fields: ["author", "pages"],
+        },
+      });
+
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          books: {
+            updates: [
+              {
+                id: 2,
+                author: "Herman Melville",
+                pages: 967,
+              },
+            ],
+          },
+        }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const error = await getResult(app, loginCookie, syncDir);
+      await constraint.delete();
+      await cleanSyncDir(app, loginCookie, syncDir);
+      expect(error).toBeDefined();
+      expect(error).toEqual({
+        message: "Duplicate value for unique field: author_pages",
+      });
+    });
+
+    it("update with translation", async () => {
+      const oldTimestamp = new Date().valueOf();
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const maxPublId = await maxId("publisher");
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          books: {
+            updates: [
+              {
+                id: 1,
+                publisher: 1,
+              },
+            ],
+          },
+          publisher: {
+            inserts: [
+              {
+                id: 1,
+                name: "my_agi",
+              },
+            ],
+          },
+        }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const { translatedIds } = await getResult(app, loginCookie, syncDir);
+      await cleanSyncDir(app, loginCookie, syncDir);
+      expect(translatedIds).toBeDefined();
+      expect(translatedIds).toEqual({
+        publisher: {
+          1: maxPublId + 1,
+        },
+      });
+      // TODO check update conflics on book
+    });
+
+    it("deletes normal", async () => {
+      const oldTimestamp = new Date().valueOf();
+      const books = Table.findOne({ name: "books" });
+      const syncTimeStamp = new Date();
+      const oldRows = await books.getRows();
+      const newId = await books.insertRow(
+        { author: "agi", pages: 22 },
+        null,
+        null,
+        false,
+        syncTimeStamp
+      );
+      const newRows = await books.getRows();
+      expect(newRows.length).toBe(oldRows.length + 1);
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          books: {
+            deletes: [
+              {
+                id: newId,
+                last_modified: syncTimeStamp.valueOf(),
+              },
+            ],
+          },
+        }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const { translatedIds } = await getResult(app, loginCookie, syncDir);
+      await cleanSyncDir(app, loginCookie, syncDir);
+      expect(translatedIds).toBeDefined();
+      const afterDelete = await books.getRows();
+      expect(afterDelete.length).toBe(oldRows.length);
+    });
+
+    // skip delete because of larger last_modified on the server side
+    it("deletes with conflicts", async () => {
+      const oldTimestamp = new Date().valueOf();
+      const books = Table.findOne({ name: "books" });
+      const syncTimeStamp = new Date();
+      const oldRows = await books.getRows();
+      const newId = await books.insertRow(
+        { author: "my_agi", pages: 22 },
+        null,
+        null,
+        false,
+        syncTimeStamp
+      );
+      await books.updateRow(
+        { pages: 11 },
+        newId,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        new Date(syncTimeStamp.valueOf() + 1)
+      );
+      const newRows = await books.getRows();
+      expect(newRows.length).toBe(oldRows.length + 1);
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          books: {
+            deletes: [
+              {
+                id: newId,
+                last_modified: syncTimeStamp.valueOf(),
+              },
+            ],
+          },
+        }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const { translatedIds } = await getResult(app, loginCookie, syncDir);
+      await cleanSyncDir(app, loginCookie, syncDir);
+      expect(translatedIds).toBeDefined();
+      const afterDelete = await books.getRows();
+      expect(afterDelete.length).toBe(newRows.length);
+    });
+
+    it("insert not authorized", async () => {
+      const oldTimestamp = new Date().valueOf();
+      const books = Table.findOne({ name: "books" });
+      books.min_role_write = 1;
+      await books.update(books);
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getUserLoginCookie();
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          books: {
+            inserts: [
+              {
+                id: 1,
+                author: "app agi",
+                pages: 1,
+                publisher: 1,
+              },
+            ],
+          },
+          publisher: {
+            inserts: [
+              {
+                id: 1,
+                name: "agi",
+              },
+            ],
+          },
+        }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const error = await getResult(app, loginCookie, syncDir);
+      await cleanSyncDir(app, loginCookie, syncDir);
+      expect(error).toBeDefined();
+      expect(error).toEqual({ message: "Unable to insert into publisher" });
+      books.min_role_write = 100;
+      await books.update(books);
+    });
+
+    it("update not authorized", async () => {
+      const oldTimestamp = new Date().valueOf();
+      const books = Table.findOne({ name: "books" });
+      books.min_role_write = 1;
+      await books.update(books);
+
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getUserLoginCookie();
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          books: {
+            updates: [
+              {
+                id: 1,
+                pages: 1,
+              },
+            ],
+          },
+        }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const error = await getResult(app, loginCookie, syncDir);
+      await cleanSyncDir(app, loginCookie, syncDir);
+      expect(error).toBeDefined();
+      expect(error).toEqual({
+        message: "Unable to update books: Not authorized",
+      });
+      books.min_role_write = 100;
+      await books.update(books);
+    });
+
+    it("delete not authorized", async () => {
+      const oldTimestamp = new Date().valueOf();
+      const syncTimeStamp = new Date();
+      const books = Table.findOne({ name: "books" });
+      books.min_role_write = 1;
+      await books.update(books);
+
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getUserLoginCookie();
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        syncTimeStamp.valueOf(),
+        oldTimestamp,
+        {
+          books: {
+            deletes: [
+              {
+                id: 1,
+                last_modified: syncTimeStamp.valueOf() + 1,
+              },
+            ],
+          },
+        }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const error = await getResult(app, loginCookie, syncDir);
+      await cleanSyncDir(app, loginCookie, syncDir);
+      expect(error).toBeDefined();
+      expect(error).toEqual({
+        message: "Unable to delete in 'books': Some rows were not deleted",
+      });
+      books.min_role_write = 100;
+      await books.update(books);
+    });
+  } else
+    it("only pq support", () => {
+      expect(true).toBe(true);
+    });
+});
+
+describe("sync dir access control", () => {
+  if (!db.isSQLite) {
+    beforeAll(async () => {
+      await initSyncInfo(["books"]);
+    });
+
+    it("upload_finished rejects access to another user's sync dir", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const adminCookie = await getAdminLoginCookie();
+      const userCookie = await getUserLoginCookie();
+
+      const resp = await doUpload(
+        app,
+        adminCookie,
+        new Date().valueOf(),
+        new Date().valueOf(),
+        { books: { inserts: [] } }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+
+      const pollResp = await request(app)
+        .get(`/sync/upload_finished?dir_name=${encodeURIComponent(syncDir)}`)
+        .set("Cookie", userCookie);
+      expect(pollResp.status).toBe(403);
+
+      await cleanSyncDir(app, adminCookie, syncDir);
+    });
+
+    it("clean_sync_dir rejects deletion of another user's sync dir", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const adminCookie = await getAdminLoginCookie();
+      const userCookie = await getUserLoginCookie();
+
+      const resp = await doUpload(
+        app,
+        adminCookie,
+        new Date().valueOf(),
+        new Date().valueOf(),
+        { books: { inserts: [] } }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+
+      const deleteResp = await request(app)
+        .post("/sync/clean_sync_dir")
+        .send({ dir_name: syncDir })
+        .set("Cookie", userCookie);
+      expect(deleteResp.status).toBe(403);
+
+      await cleanSyncDir(app, adminCookie, syncDir);
+    });
+  } else
+    it("only pq support", () => {
+      expect(true).toBe(true);
+    });
+});
+
+describe("SQL injection protection", () => {
+  if (!db.isSQLite) {
+    beforeAll(async () => {
+      await initSyncInfo(["books"]);
+    });
+
+    // --- /sync/load_changes : lastModifiedAt ---
+
+    it("rejects SQL injection in lastModifiedAt (OR 1=1)", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: new Date().valueOf(),
+          syncInfos: { books: { lastModifiedAt: "0 OR 1=1--" } },
+        })
+        .expect(
+          respondJsonWith(
+            400,
+            (resp) => resp.error === "Invalid lastModifiedAt"
+          )
+        );
+    });
+
+    it("rejects SQL injection in lastModifiedAt (UNION SELECT)", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: new Date().valueOf(),
+          syncInfos: {
+            books: { lastModifiedAt: "0 UNION SELECT * FROM users--" },
+          },
+        })
+        .expect(
+          respondJsonWith(
+            400,
+            (resp) => resp.error === "Invalid lastModifiedAt"
+          )
+        );
+    });
+
+    it("rejects SQL injection in lastModifiedAt (stacked query)", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: new Date().valueOf(),
+          syncInfos: {
+            books: { lastModifiedAt: "0; DROP TABLE books; --" },
+          },
+        })
+        .expect(
+          respondJsonWith(
+            400,
+            (resp) => resp.error === "Invalid lastModifiedAt"
+          )
+        );
+    });
+
+    it("rejects non-numeric string for lastModifiedAt", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: new Date().valueOf(),
+          syncInfos: { books: { lastModifiedAt: "abc" } },
+        })
+        .expect(
+          respondJsonWith(
+            400,
+            (resp) => resp.error === "Invalid lastModifiedAt"
+          )
+        );
+    });
+
+    it("rejects float lastModifiedAt", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: new Date().valueOf(),
+          syncInfos: { books: { lastModifiedAt: 1.5 } },
+        })
+        .expect(
+          respondJsonWith(
+            400,
+            (resp) => resp.error === "Invalid lastModifiedAt"
+          )
+        );
+    });
+
+    // --- /sync/load_changes : syncFrom ---
+
+    it("rejects invalid syncFrom date", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: new Date().valueOf(),
+          syncInfos: { books: { lastModifiedAt: 0, syncFrom: "not-a-date" } },
+        })
+        .expect(
+          respondJsonWith(400, (resp) => resp.error === "Invalid syncFrom")
+        );
+    });
+
+    it("rejects SQL injection payload as syncFrom", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: new Date().valueOf(),
+          syncInfos: {
+            books: { lastModifiedAt: 0, syncFrom: "0); SELECT pg_sleep(5)--" },
+          },
+        })
+        .expect(
+          respondJsonWith(400, (resp) => resp.error === "Invalid syncFrom")
+        );
+    });
+
+    // --- /sync/load_changes : loadUntil (syncUntil) ---
+
+    it("rejects invalid loadUntil date", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: "not-a-date",
+          syncInfos: { books: { lastModifiedAt: 0 } },
+        })
+        .expect(
+          respondJsonWith(400, (resp) => resp.error === "Invalid syncUntil")
+        );
+    });
+
+    // --- /sync/deletes : syncTimestamp ---
+
+    it("rejects invalid syncTimestamp in /sync/deletes", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post("/sync/deletes")
+        .set("Cookie", loginCookie)
+        .send({
+          syncTimestamp: "not-a-date",
+          syncInfos: { books: { syncFrom: new Date(1000).valueOf() } },
+        })
+        .expect(
+          respondJsonWith(400, (resp) => resp.error === "Invalid syncUntil")
+        );
+    });
+
+    it("rejects SQL injection payload as syncTimestamp in /sync/deletes", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post("/sync/deletes")
+        .set("Cookie", loginCookie)
+        .send({
+          syncTimestamp: "0); SELECT * FROM users--",
+          syncInfos: { books: { syncFrom: new Date(1000).valueOf() } },
+        })
+        .expect(
+          respondJsonWith(400, (resp) => resp.error === "Invalid syncUntil")
+        );
+    });
+
+    // --- /sync/deletes : syncFrom ---
+
+    it("rejects invalid syncFrom in /sync/deletes", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post("/sync/deletes")
+        .set("Cookie", loginCookie)
+        .send({
+          syncTimestamp: new Date().valueOf(),
+          syncInfos: { books: { syncFrom: "not-a-date" } },
+        })
+        .expect(
+          respondJsonWith(400, (resp) => resp.error === "Invalid syncFrom")
+        );
+    });
+
+    it("rejects SQL injection payload as syncFrom in /sync/deletes", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      await request(app)
+        .post("/sync/deletes")
+        .set("Cookie", loginCookie)
+        .send({
+          syncTimestamp: new Date().valueOf(),
+          syncInfos: {
+            books: { syncFrom: "0); SELECT pg_sleep(5)--" },
+          },
+        })
+        .expect(
+          respondJsonWith(400, (resp) => resp.error === "Invalid syncFrom")
+        );
+    });
+
+    // --- regression: valid requests still succeed ---
+
+    it("valid lastModifiedAt value still works", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const resp = await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: new Date().valueOf(),
+          syncInfos: { books: { lastModifiedAt: 0 } },
+        });
+      expect(resp.status).toBe(200);
+      expect(resp._body.books).toBeDefined();
+    });
+
+    it("valid syncFrom timestamp still works", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const resp = await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", loginCookie)
+        .send({
+          loadUntil: new Date().valueOf(),
+          syncInfos: { books: { lastModifiedAt: 0, syncFrom: 1000 } },
+        });
+      expect(resp.status).toBe(200);
+    });
+
+    it("valid /sync/deletes request still works", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const resp = await request(app)
+        .post("/sync/deletes")
+        .set("Cookie", loginCookie)
+        .send({
+          syncTimestamp: new Date().valueOf(),
+          syncInfos: { books: { syncFrom: 1000 } },
+        });
+      expect(resp.status).toBe(200);
+      expect(resp._body.deletes).toBeDefined();
+    });
+  } else
+    it("only pq support", () => {
+      expect(true).toBe(true);
+    });
+});
+
+describe("deletes authorization", () => {
+  if (!db.isSQLite) {
+    beforeAll(async () => {
+      await initSyncInfo(["patients"]);
+    });
+
+    it("should not return deletes for tables the user cannot read", async () => {
+      const app = await getApp({ disableCsrf: true });
+      const patients = Table.findOne({ name: "patients" });
+      // patients has min_role_read=40 (staff), user role is 80
+      expect(patients.min_role_read).toBe(40);
+
+      const syncFrom = new Date(Date.now() - 10000);
+
+      // Insert and delete a row so there is a delete event in sync_info
+      const newId = await patients.insertRow({ name: "Secret Patient" });
+      await patients.deleteRows({ id: newId });
+      await sleep(200);
+
+      const syncUntil = new Date(Date.now() + 10000);
+
+      // As a regular user (role 80), try to see the deletion
+      const userCookie = await getUserLoginCookie();
+      const resp = await request(app)
+        .post("/sync/deletes")
+        .set("Cookie", userCookie)
+        .send({
+          syncTimestamp: syncUntil.valueOf(),
+          syncInfos: {
+            patients: {
+              syncFrom: syncFrom.valueOf(),
+            },
+          },
+        });
+      expect(resp.status).toBe(200);
+      const data = resp._body;
+      // The user should NOT be able to see deletes from the patients table
+      // because they lack the required min_role_read (40 < 80).
+      // If deletes.patients exists and has rows, that is the vulnerability.
+      const patientDeletes = data.deletes?.patients || [];
+      expect(patientDeletes.length).toBe(0);
+    });
+  } else
+    it("only pq support", () => {
+      expect(true).toBe(true);
+    });
+});
+
+describe("deletes authorization with ownership_formula", () => {
+  if (!db.isSQLite) {
+    let userA, userB;
+    let ownedTable, childTable;
+    let userACookie, userBCookie;
+
+    const loginAs = async (email, password) => {
+      const app = await getApp({ disableCsrf: true });
+      const res = await request(app)
+        .post("/auth/login/")
+        .send(`email=${email}`)
+        .send(`password=${password}`);
+      return res.headers["set-cookie"];
+    };
+
+    beforeAll(async () => {
+      await resetToFixtures();
+
+      // Two regular users — userA owns the rows, userB does not
+      userA = await User.create({
+        email: "userA_sync@test.com",
+        password: "TestPassA1!",
+        role_id: 80,
+      });
+      userB = await User.create({
+        email: "userB_sync@test.com",
+        password: "TestPassB1!",
+        role_id: 80,
+      });
+      userACookie = await loginAs("userA_sync@test.com", "TestPassA1!");
+      userBCookie = await loginAs("userB_sync@test.com", "TestPassB1!");
+
+      const usersTable = Table.findOne({ name: "users" });
+
+      // Parent table: min_role_read=40 so regular users (role 80) access via
+      // ownership only. ownership_formula is a direct field reference.
+      ownedTable = await Table.create("sync_owned", { min_role_read: 40 });
+      await Field.create({
+        table: ownedTable,
+        name: "item_name",
+        label: "Item name",
+        type: "String",
+      });
+      await Field.create({
+        table: ownedTable,
+        name: "owner",
+        label: "Owner",
+        type: "Key",
+        reftable: usersTable,
+        attributes: { summary_field: "email" },
+      });
+      ownedTable = Table.findOne({ name: "sync_owned" });
+      ownedTable.ownership_formula = "owner === user.id";
+      await ownedTable.update(ownedTable);
+      ownedTable = Table.findOne({ name: "sync_owned" });
+
+      // Child table: ownership resolved through a join field.
+      // formula: "sync_owned_ref?.owner === user.id"
+      // After getJoinedRows, row.sync_owned_ref is { id, owner } so the
+      // formula evaluates correctly.
+      childTable = await Table.create("sync_child", { min_role_read: 40 });
+      await Field.create({
+        table: childTable,
+        name: "child_name",
+        label: "Child name",
+        type: "String",
+      });
+      await Field.create({
+        table: childTable,
+        name: "sync_owned_ref",
+        label: "Sync owned ref",
+        type: "Key",
+        reftable: ownedTable,
+        attributes: { summary_field: "item_name" },
+      });
+      childTable = Table.findOne({ name: "sync_child" });
+      childTable.ownership_formula = "sync_owned_ref?.owner === user.id";
+      await childTable.update(childTable);
+      childTable = Table.findOne({ name: "sync_child" });
+
+      // Enable sync tracking on both tables
+      await initSyncInfo(["sync_owned", "sync_child"]);
+      // Re-fetch so has_sync_info = true is reflected in the local references
+      ownedTable = Table.findOne({ name: "sync_owned" });
+      childTable = Table.findOne({ name: "sync_child" });
+    });
+
+    afterAll(async () => {
+      if (childTable) await childTable.delete();
+      if (ownedTable) await ownedTable.delete();
+      if (userA) await userA.delete();
+      if (userB) await userB.delete();
+    });
+
+    it("direct formula: owner sees their own deleted rows", async () => {
+      const syncFrom = new Date(Date.now() - 10000);
+      const itemId = await ownedTable.insertRow({
+        item_name: "userA item",
+        owner: userA.id,
+      });
+      await ownedTable.deleteRows({ id: itemId });
+      await sleep(200);
+      const syncUntil = new Date(Date.now() + 10000);
+
+      const app = await getApp({ disableCsrf: true });
+      const resp = await request(app)
+        .post("/sync/deletes")
+        .set("Cookie", userACookie)
+        .send({
+          syncTimestamp: syncUntil.valueOf(),
+          syncInfos: { sync_owned: { syncFrom: syncFrom.valueOf() } },
+        });
+      expect(resp.status).toBe(200);
+      const deletes = resp._body.deletes?.sync_owned || [];
+      expect(deletes.length).toBe(1);
+      expect(Number(deletes[0].ref)).toBe(itemId);
+    });
+
+    it("direct formula: non-owner does not see deleted rows", async () => {
+      const syncFrom = new Date(Date.now() - 10000);
+      const itemId = await ownedTable.insertRow({
+        item_name: "another userA item",
+        owner: userA.id,
+      });
+      await ownedTable.deleteRows({ id: itemId });
+      await sleep(200);
+      const syncUntil = new Date(Date.now() + 10000);
+
+      const app = await getApp({ disableCsrf: true });
+      const resp = await request(app)
+        .post("/sync/deletes")
+        .set("Cookie", userBCookie)
+        .send({
+          syncTimestamp: syncUntil.valueOf(),
+          syncInfos: { sync_owned: { syncFrom: syncFrom.valueOf() } },
+        });
+      expect(resp.status).toBe(200);
+      const deletes = resp._body.deletes?.sync_owned || [];
+      expect(deletes.length).toBe(0);
+    });
+
+    it("join formula: owner sees deleted child rows", async () => {
+      const syncFrom = new Date(Date.now() - 10000);
+      const parentId = await ownedTable.insertRow({
+        item_name: "parent for join test",
+        owner: userA.id,
+      });
+      const childId = await childTable.insertRow({
+        child_name: "child of userA",
+        sync_owned_ref: parentId,
+      });
+      await childTable.deleteRows({ id: childId });
+      await sleep(200);
+      const syncUntil = new Date(Date.now() + 10000);
+
+      const app = await getApp({ disableCsrf: true });
+      const resp = await request(app)
+        .post("/sync/deletes")
+        .set("Cookie", userACookie)
+        .send({
+          syncTimestamp: syncUntil.valueOf(),
+          syncInfos: { sync_child: { syncFrom: syncFrom.valueOf() } },
+        });
+      expect(resp.status).toBe(200);
+      const deletes = resp._body.deletes?.sync_child || [];
+      expect(deletes.length).toBe(1);
+      expect(Number(deletes[0].ref)).toBe(childId);
+    });
+
+    it("join formula: non-owner does not see deleted child rows", async () => {
+      const syncFrom = new Date(Date.now() - 10000);
+      const parentId = await ownedTable.insertRow({
+        item_name: "parent for join test 2",
+        owner: userA.id,
+      });
+      const childId = await childTable.insertRow({
+        child_name: "child of userA 2",
+        sync_owned_ref: parentId,
+      });
+      await childTable.deleteRows({ id: childId });
+      await sleep(200);
+      const syncUntil = new Date(Date.now() + 10000);
+
+      const app = await getApp({ disableCsrf: true });
+      const resp = await request(app)
+        .post("/sync/deletes")
+        .set("Cookie", userBCookie)
+        .send({
+          syncTimestamp: syncUntil.valueOf(),
+          syncInfos: { sync_child: { syncFrom: syncFrom.valueOf() } },
+        });
+      expect(resp.status).toBe(200);
+      const deletes = resp._body.deletes?.sync_child || [];
+      expect(deletes.length).toBe(0);
+    });
+  } else
+    it("only pq support", () => {
+      expect(true).toBe(true);
+    });
+});
+
+describe("field level conflicts", () => {
+  if (!db.isSQLite) {
+    beforeAll(async () => {
+      await initSyncInfo(["books"]);
+    });
+    it("merges non-conflicting fields on update", async () => {
+      const oldTimestamp = new Date().valueOf();
+      const books = Table.findOne({ name: "books" });
+      // insert and update a row
+      const id = await books.insertRow({
+        author: "Original Author",
+        pages: 100,
+      });
+      await books.updateRow({ author: "Author changed on web" }, id);
+
+      // sync a non conflicting field
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          books: {
+            updates: [
+              {
+                id: id,
+                pages: 1,
+              },
+            ],
+          },
+        }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const result = await getResult(app, loginCookie, syncDir);
+
+      expect(result.translatedIds).toEqual({});
+      expect(result.uniqueConflicts).toEqual({});
+      expect(result.dataConflicts).toEqual({});
+
+      const row = await books.getRow({ id: id });
+      expect(row.author).toBe("Author changed on web");
+      expect(row.pages).toBe(1);
+    });
+
+    it("detects conflicting fields on update", async () => {
+      const oldTimestamp = new Date().valueOf();
+
+      const books = Table.findOne({ name: "books" });
+      // insert and update a row
+      const id = await books.insertRow({
+        author: "Original Author",
+        pages: 100,
+      });
+      await books.updateRow({ author: "Author changed on web" }, id);
+
+      // sync a conflicting field
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          books: {
+            updates: [
+              {
+                id: id,
+                author: "Author changed offline",
+                pages: 200,
+              },
+            ],
+          },
+        }
+      );
+
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const result = await getResult(app, loginCookie, syncDir);
+
+      expect(result.translatedIds).toEqual({});
+      expect(result.uniqueConflicts).toEqual({});
+      expect(result.dataConflicts).toEqual({
+        books: [
+          {
+            id: id,
+            author: "Author changed on web",
+          },
+        ],
+      });
+
+      const row = await books.getRow({ id: id });
+      expect(row.author).toBe("Author changed on web");
+      expect(row.pages).toBe(200);
+    });
+  } else
+    it("only pq support", () => {
+      expect(true).toBe(true);
+    });
+});
+
+describe("load_changes authorization with ownership_formula", () => {
+  if (!db.isSQLite) {
+    let userA, userB;
+    let ownedTable, childTable;
+    let userACookie, userBCookie;
+
+    const loginAs = async (email, password) => {
+      const app = await getApp({ disableCsrf: true });
+      const res = await request(app)
+        .post("/auth/login/")
+        .send(`email=${email}`)
+        .send(`password=${password}`);
+      return res.headers["set-cookie"];
+    };
+
+    beforeAll(async () => {
+      await resetToFixtures();
+
+      userA = await User.create({
+        email: "userA_lc@test.com",
+        password: "TestPassA1!",
+        role_id: 80,
+      });
+      userB = await User.create({
+        email: "userB_lc@test.com",
+        password: "TestPassB1!",
+        role_id: 80,
+      });
+      userACookie = await loginAs("userA_lc@test.com", "TestPassA1!");
+      userBCookie = await loginAs("userB_lc@test.com", "TestPassB1!");
+
+      const usersTable = Table.findOne({ name: "users" });
+
+      // Direct formula table: min_role_read=40, ownership_formula = "owner === user.id"
+      ownedTable = await Table.create("lc_owned", { min_role_read: 40 });
+      await Field.create({
+        table: ownedTable,
+        name: "item_name",
+        label: "Item name",
+        type: "String",
+      });
+      await Field.create({
+        table: ownedTable,
+        name: "owner",
+        label: "Owner",
+        type: "Key",
+        reftable: usersTable,
+        attributes: { summary_field: "email" },
+      });
+      ownedTable = Table.findOne({ name: "lc_owned" });
+      ownedTable.ownership_formula = "owner === user.id";
+      await ownedTable.update(ownedTable);
+      ownedTable = Table.findOne({ name: "lc_owned" });
+
+      // Join formula table: ownership resolved through a join field
+      childTable = await Table.create("lc_child", { min_role_read: 40 });
+      await Field.create({
+        table: childTable,
+        name: "child_name",
+        label: "Child name",
+        type: "String",
+      });
+      await Field.create({
+        table: childTable,
+        name: "lc_owned_ref",
+        label: "Lc owned ref",
+        type: "Key",
+        reftable: ownedTable,
+        attributes: { summary_field: "item_name" },
+      });
+      childTable = Table.findOne({ name: "lc_child" });
+      childTable.ownership_formula = "lc_owned_ref?.owner === user.id";
+      await childTable.update(childTable);
+      childTable = Table.findOne({ name: "lc_child" });
+
+      await initSyncInfo(["lc_owned", "lc_child"]);
+      ownedTable = Table.findOne({ name: "lc_owned" });
+      childTable = Table.findOne({ name: "lc_child" });
+    });
+
+    afterAll(async () => {
+      if (childTable) await childTable.delete();
+      if (ownedTable) await ownedTable.delete();
+      if (userA) await userA.delete();
+      if (userB) await userB.delete();
+    });
+
+    it("direct formula: owner sees their own rows in load_changes", async () => {
+      const itemId = await ownedTable.insertRow({
+        item_name: "userA lc item",
+        owner: userA.id,
+      });
+      const loadUntil = new Date(Date.now() + 10000);
+
+      const app = await getApp({ disableCsrf: true });
+      const resp = await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", userACookie)
+        .send({
+          loadUntil: loadUntil.valueOf(),
+          syncInfos: {
+            lc_owned: { lastModifiedAt: 0 },
+          },
+        });
+      expect(resp.status).toBe(200);
+      const rows = resp._body.lc_owned?.rows || [];
+      expect(rows.some((r) => r.id === itemId)).toBe(true);
+    });
+
+    it("direct formula: non-owner does not see rows in load_changes", async () => {
+      const itemId = await ownedTable.insertRow({
+        item_name: "userA lc item 2",
+        owner: userA.id,
+      });
+      const loadUntil = new Date(Date.now() + 10000);
+
+      const app = await getApp({ disableCsrf: true });
+      const resp = await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", userBCookie)
+        .send({
+          loadUntil: loadUntil.valueOf(),
+          syncInfos: {
+            lc_owned: { lastModifiedAt: 0 },
+          },
+        });
+      expect(resp.status).toBe(200);
+      const rows = resp._body.lc_owned?.rows || [];
+      expect(rows.some((r) => r.id === itemId)).toBe(false);
+    });
+
+    it("join formula: owner sees their child rows in load_changes", async () => {
+      const parentId = await ownedTable.insertRow({
+        item_name: "parent for lc join test",
+        owner: userA.id,
+      });
+      const childId = await childTable.insertRow({
+        child_name: "child of userA lc",
+        lc_owned_ref: parentId,
+      });
+      const loadUntil = new Date(Date.now() + 10000);
+
+      const app = await getApp({ disableCsrf: true });
+      const resp = await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", userACookie)
+        .send({
+          loadUntil: loadUntil.valueOf(),
+          syncInfos: {
+            lc_child: { lastModifiedAt: 0 },
+          },
+        });
+      expect(resp.status).toBe(200);
+      const rows = resp._body.lc_child?.rows || [];
+      expect(rows.some((r) => r.id === childId)).toBe(true);
+    });
+
+    it("join formula: non-owner does not see child rows in load_changes", async () => {
+      const parentId = await ownedTable.insertRow({
+        item_name: "parent for lc join test 2",
+        owner: userA.id,
+      });
+      const childId = await childTable.insertRow({
+        child_name: "child of userA lc 2",
+        lc_owned_ref: parentId,
+      });
+      const loadUntil = new Date(Date.now() + 10000);
+
+      const app = await getApp({ disableCsrf: true });
+      const resp = await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", userBCookie)
+        .send({
+          loadUntil: loadUntil.valueOf(),
+          syncInfos: {
+            lc_child: { lastModifiedAt: 0 },
+          },
+        });
+      expect(resp.status).toBe(200);
+      const rows = resp._body.lc_child?.rows || [];
+      expect(rows.some((r) => r.id === childId)).toBe(false);
+    });
+
+    it("direct formula: owner sees updated rows via syncFrom in load_changes", async () => {
+      const itemId = await ownedTable.insertRow({
+        item_name: "userA lc syncFrom item",
+        owner: userA.id,
+      });
+      const syncFrom = await db.time();
+      await sleep(100);
+      await ownedTable.updateRow({ item_name: "userA lc updated" }, itemId);
+      const loadUntil = new Date(Date.now() + 10000);
+
+      const app = await getApp({ disableCsrf: true });
+      const resp = await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", userACookie)
+        .send({
+          loadUntil: loadUntil.valueOf(),
+          syncInfos: {
+            lc_owned: { lastModifiedAt: 0, syncFrom: syncFrom.valueOf() },
+          },
+        });
+      expect(resp.status).toBe(200);
+      const rows = resp._body.lc_owned?.rows || [];
+      expect(rows.some((r) => r.id === itemId)).toBe(true);
+    });
+
+    it("direct formula: non-owner does not see updated rows via syncFrom in load_changes", async () => {
+      const itemId = await ownedTable.insertRow({
+        item_name: "userA lc syncFrom item 2",
+        owner: userA.id,
+      });
+      const syncFrom = await db.time();
+      await sleep(100);
+      await ownedTable.updateRow({ item_name: "userA lc updated 2" }, itemId);
+      const loadUntil = new Date(Date.now() + 10000);
+
+      const app = await getApp({ disableCsrf: true });
+      const resp = await request(app)
+        .post("/sync/load_changes")
+        .set("Cookie", userBCookie)
+        .send({
+          loadUntil: loadUntil.valueOf(),
+          syncInfos: {
+            lc_owned: { lastModifiedAt: 0, syncFrom: syncFrom.valueOf() },
+          },
+        });
+      expect(resp.status).toBe(200);
+      const rows = resp._body.lc_owned?.rows || [];
+      expect(rows.some((r) => r.id === itemId)).toBe(false);
+    });
+  } else
+    it("only pq support", () => {
+      expect(true).toBe(true);
+    });
+});
+
+describe("cross-table FK translation during inserts", () => {
+  if (!db.isSQLite) {
+    beforeAll(async () => {
+      await initSyncInfo(["books", "publisher"]);
+    });
+
+    it("FK is translated when child is listed before parent in changes", async () => {
+      const oldTimestamp = new Date().valueOf();
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+
+      // Use IDs far above any existing server IDs so FK cannot be satisfied
+      // by an already-existing row — only the topo-ordered insert of publisher
+      // first makes this work.
+      const maxPublId = await maxId("publisher");
+      const maxBookId = await maxId("books");
+      const localPublisherId = maxPublId + 100;
+      const localBookId = maxBookId + 100;
+
+      // Deliberately list books (child) before publisher (parent) in the payload.
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          books: {
+            inserts: [
+              {
+                id: localBookId,
+                author: "Cross FK Author",
+                pages: 77,
+                publisher: localPublisherId,
+              },
+            ],
+          },
+          publisher: {
+            inserts: [{ id: localPublisherId, name: "Cross FK Publisher" }],
+          },
+        }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const result = await getResult(app, loginCookie, syncDir);
+      await cleanSyncDir(app, loginCookie, syncDir);
+
+      expect(result.translatedIds).toBeDefined();
+      const serverPublisherId =
+        result.translatedIds.publisher?.[localPublisherId];
+      const serverBookId = result.translatedIds.books?.[localBookId];
+      expect(serverPublisherId).toBeDefined();
+      expect(serverBookId).toBeDefined();
+
+      // The inserted book must reference the new server publisher ID, not the
+      // original local one.
+      const books = Table.findOne({ name: "books" });
+      const insertedBook = await books.getRow({ id: serverBookId });
+      expect(insertedBook).toBeDefined();
+      expect(insertedBook.publisher).toBe(serverPublisherId);
+    });
+
+    it("FK translation works regardless of key order in changes object", async () => {
+      const oldTimestamp = new Date().valueOf();
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+
+      const maxPublId = await maxId("publisher");
+      const maxBookId = await maxId("books");
+      const localPublisherId = maxPublId + 100;
+      const localBookId = maxBookId + 100;
+
+      // This time publisher is listed first — result should be identical.
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          publisher: {
+            inserts: [{ id: localPublisherId, name: "Cross FK Publisher 2" }],
+          },
+          books: {
+            inserts: [
+              {
+                id: localBookId,
+                author: "Cross FK Author 2",
+                pages: 88,
+                publisher: localPublisherId,
+              },
+            ],
+          },
+        }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const result = await getResult(app, loginCookie, syncDir);
+      await cleanSyncDir(app, loginCookie, syncDir);
+
+      const serverPublisherId =
+        result.translatedIds.publisher?.[localPublisherId];
+      const serverBookId = result.translatedIds.books?.[localBookId];
+      expect(serverPublisherId).toBeDefined();
+      expect(serverBookId).toBeDefined();
+
+      const books = Table.findOne({ name: "books" });
+      const insertedBook = await books.getRow({ id: serverBookId });
+      expect(insertedBook.publisher).toBe(serverPublisherId);
+    });
+  } else
+    it("only pq support", () => {
+      expect(true).toBe(true);
+    });
+});
+
+describe("cyclic FK insert via sync", () => {
+  if (!db.isSQLite) {
+    let tableA, tableB;
+
+    beforeAll(async () => {
+      await resetToFixtures();
+
+      // tableA.b_ref -> tableB (required), tableB.a_ref -> tableA (nullable)
+      tableA = await Table.create("sync_cycle_a", {
+        min_role_read: 100,
+        min_role_write: 100,
+      });
+      await Field.create({
+        table: tableA,
+        name: "name",
+        label: "Name",
+        type: "String",
+      });
+
+      tableB = await Table.create("sync_cycle_b", {
+        min_role_read: 100,
+        min_role_write: 100,
+      });
+      await Field.create({
+        table: tableB,
+        name: "name",
+        label: "Name",
+        type: "String",
+      });
+
+      await Field.create({
+        table: tableA,
+        name: "b_ref",
+        label: "B ref",
+        type: "Key",
+        reftable: tableB,
+        attributes: { summary_field: "name" },
+        required: true,
+      });
+      await Field.create({
+        table: tableB,
+        name: "a_ref",
+        label: "A ref",
+        type: "Key",
+        reftable: tableA,
+        attributes: { summary_field: "name" },
+        required: false,
+      });
+
+      await initSyncInfo(["sync_cycle_a", "sync_cycle_b"]);
+      tableA = Table.findOne({ name: "sync_cycle_a" });
+      tableB = Table.findOne({ name: "sync_cycle_b" });
+    });
+
+    afterAll(async () => {
+      // Break the cycle by dropping A's FK to B first, then B can be dropped,
+      // then A.
+      const freshA = Table.findOne({ name: "sync_cycle_a" });
+      const bRefField = freshA?.getFields().find((f) => f.name === "b_ref");
+      if (bRefField) await bRefField.delete();
+      if (tableB) await tableB.delete();
+      if (tableA) await tableA.delete();
+    });
+
+    it("inserts both cyclic rows with FKs correctly resolved", async () => {
+      const oldTimestamp = new Date().valueOf();
+      const app = await getApp({ disableCsrf: true });
+      const loginCookie = await getAdminLoginCookie();
+
+      const localAId = 9001;
+      const localBId = 9002;
+
+      // Submit A before B so that without topo/cycle handling this would fail:
+      // A.b_ref points to a B row that doesn't exist on the server yet.
+      const resp = await doUpload(
+        app,
+        loginCookie,
+        new Date().valueOf(),
+        oldTimestamp,
+        {
+          sync_cycle_a: {
+            inserts: [{ id: localAId, name: "row A", b_ref: localBId }],
+          },
+          sync_cycle_b: {
+            inserts: [{ id: localBId, name: "row B", a_ref: localAId }],
+          },
+        }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      const result = await getResult(app, loginCookie, syncDir);
+      await cleanSyncDir(app, loginCookie, syncDir);
+
+      expect(result.translatedIds).toBeDefined();
+      const serverAId = result.translatedIds.sync_cycle_a?.[localAId];
+      const serverBId = result.translatedIds.sync_cycle_b?.[localBId];
+      expect(serverAId).toBeDefined();
+      expect(serverBId).toBeDefined();
+
+      // A.b_ref must point to the server-assigned B ID
+      const rowA = await tableA.getRow({ id: serverAId });
+      expect(rowA.b_ref).toBe(serverBId);
+
+      // B.a_ref must point to the server-assigned A ID (deferred post-UPDATE)
+      const rowB = await tableB.getRow({ id: serverBId });
+      expect(rowB.a_ref).toBe(serverAId);
+    });
+  } else
+    it("only pq support", () => {
+      expect(true).toBe(true);
+    });
+});
+
+describe("sync dir email suffix attack", () => {
+  if (!db.isSQLite) {
+    beforeAll(async () => {
+      await initSyncInfo(["books"]);
+    });
+
+    it("rejects access when attacker email is a suffix of victim email", async () => {
+      // Create a victim user whose email contains "_user@foo.com" as a suffix
+      // The existing user@foo.com has suffix "_user@foo.com"
+      // "timestamp_x_user@foo.com".endsWith("_user@foo.com") === true
+      // so user@foo.com could access x_user@foo.com's sync dir
+      const victimEmail = "x_user@foo.com";
+      const victimPassword = "TestPass123!";
+      await User.create({
+        email: victimEmail,
+        password: victimPassword,
+        role_id: 80,
+      });
+
+      const app = await getApp({ disableCsrf: true });
+
+      // Login as victim
+      const victimRes = await request(app)
+        .post("/auth/login/")
+        .send(`email=${victimEmail}`)
+        .send(`password=${victimPassword}`);
+      const victimCookie = resToLoginCookie(victimRes);
+
+      // Victim creates a sync directory
+      const resp = await doUpload(
+        app,
+        victimCookie,
+        new Date().valueOf(),
+        new Date().valueOf(),
+        { books: { inserts: [] } }
+      );
+      expect(resp.status).toBe(200);
+      const { syncDir } = resp._body;
+      // syncDir looks like "1234567890123_x_user@foo.com"
+      // endsWith("_user@foo.com") is true!
+      expect(syncDir.endsWith("_user@foo.com")).toBe(true);
+
+      // Login as the attacker (user@foo.com)
+      const attackerCookie = await getUserLoginCookie();
+
+      // Attacker tries to read victim's sync results
+      const pollResp = await request(app)
+        .get(`/sync/upload_finished?dir_name=${encodeURIComponent(syncDir)}`)
+        .set("Cookie", attackerCookie);
+      // Should be 403 - attacker must not access victim's sync dir
+      expect(pollResp.status).toBe(403);
+
+      // Attacker tries to delete victim's sync dir
+      const deleteResp = await request(app)
+        .post("/sync/clean_sync_dir")
+        .send({ dir_name: syncDir })
+        .set("Cookie", attackerCookie);
+      // Should be 403
+      expect(deleteResp.status).toBe(403);
+
+      // Cleanup
+      await cleanSyncDir(app, victimCookie, syncDir);
+    });
+  } else
+    it("only pq support", () => {
+      expect(true).toBe(true);
+    });
+});

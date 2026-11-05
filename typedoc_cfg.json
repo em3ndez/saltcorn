@@ -1,0 +1,19 @@
+{
+  "entryPointStrategy": "packages",
+  "excludePrivate": true,
+  "customCss": "./deploy/typedoc/custom.css",
+  "entryPoints": [
+    "packages/saltcorn-admin-models",
+    "packages/saltcorn-types",
+    "packages/sqlite",
+    "packages/sqlite-mobile",
+    "packages/saltcorn-markup",
+    "packages/saltcorn-data",
+    "packages/db-common",
+    "packages/saltcorn-mobile-builder",
+    "packages/common-code"
+  ],
+  "out": "docs",
+  "plugin": ["typedoc-plugin-rename-defaults"],
+  "readme": "deploy/typedoc/documentation_main.md"
+}

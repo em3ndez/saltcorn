@@ -1,0 +1,340 @@
+/**
+ * This is the sqlite-common module
+ * It contains utils for "@saltcorn/sqlite" and "@saltcorn/sqlite-mobile"
+ * @module
+ */
+import { Row, sqlsanitize, Value, mkWhere, Where } from "./internal.js";
+
+function isDateFromIframe(val: any) {
+  return Object.prototype.toString.call(val) === "[object Date]";
+}
+
+/**
+ * @param v
+ * @returns
+ * @function
+ */
+export const reprAsJson = (v: any, jsonCol?: boolean): boolean =>
+  (jsonCol && (v === true || v === false)) ||
+  (typeof v === "object" &&
+    v !== null &&
+    v?.constructor?.name !== "PlainDate" &&
+    !(v instanceof Date || isDateFromIframe(v)));
+
+const isDate = (value: any): boolean =>
+  value && Object.prototype.toString.call(value) === "[object Date]";
+
+/**
+ * @param opts
+ * @param opts.k
+ * @param  opts.v
+ * @returns
+ */
+export const mkVal = ([k, v]: [string, any], jsonCol?: boolean): Value =>
+  reprAsJson(v, jsonCol)
+    ? JSON.stringify(v)
+    : isDate(v) || v?.constructor?.name === "PlainDate"
+      ? v.valueOf()
+      : v;
+
+/**
+ * return type of buildInsertSql()
+ * wraps the INSERT sql string and the values to insert
+ */
+export type SqlAndValues = {
+  sql: string;
+  valList: Array<any>;
+};
+
+/**
+ * Build a INSERT INTO sql statement for one row
+ * @param tbl table name
+ * @param obj row to insert
+ * @param opts noid, ignoreExisting, replace
+ * @returns sql string and values for the placeholders
+ */
+export const buildInsertSql = (
+  tbl: string,
+  obj: Row,
+  opts: {
+    noid?: boolean;
+    ignoreExisting?: boolean;
+    replace?: boolean;
+    jsonCols?: string[];
+  } = {}
+): SqlAndValues => {
+  const kvs = Object.entries(obj);
+  const fnameList = kvs.map(([k, v]) => `"${sqlsanitize(k)}"`).join();
+  const valPosList = kvs
+    .map(([k, v]) =>
+      v &&
+      typeof v === "object" &&
+      "next_version_by_id" in v &&
+      v.next_version_by_id
+        ? `coalesce((select max(_version) from "${sqlsanitize(
+            tbl
+          )}" where "${v.pk_name || "id"}"=${+v.next_version_by_id}), 0)+1`
+        : reprAsJson(v, opts.jsonCols?.includes(k))
+          ? "json(?)"
+          : "?"
+    )
+    .join();
+  const valList = kvs
+    .filter(([k, v]: [any, any]) => !(v && v.next_version_by_id))
+    .map(([k, v]) => {
+      return mkVal([k, v], opts.jsonCols?.includes(k));
+    });
+  const ignoreExisting = opts.ignoreExisting ? "or ignore" : "";
+  const replace = opts.replace ? "or replace" : "";
+  const sql = `insert ${ignoreExisting} ${replace} into "${sqlsanitize(
+    tbl
+  )}"(${fnameList}) values(${valPosList})`;
+
+  return {
+    sql: sql,
+    valList: valList,
+  };
+};
+
+type SqlAndValuesBulk = {
+  sql: string;
+  vals: string[];
+};
+
+/**
+ * Build INSERT INTO sql statements for multiple rows
+ * The rows are grouped by fields that are the same
+ * @param tbl table name
+ * @param objs rows to insert
+ * @param opts noid, ignoreExisting, replace
+ * @returns an array of sql strings with values for the placeholders
+ */
+export const buildInsertBulkSql = (
+  tbl: string,
+  objs: Row[],
+  opts: { noid?: boolean; ignoreExisting?: boolean; replace?: boolean } = {}
+): Array<SqlAndValuesBulk> => {
+  const result = new Array<SqlAndValuesBulk>();
+  const ignoreExisting = opts.ignoreExisting ? "or ignore" : "";
+  const replace = opts.replace ? "or replace" : "";
+  // group rows by fields that are the same
+  const fieldsWithRows: any = {};
+  for (const obj of objs) {
+    const kvs = Object.entries(obj);
+    const fnames = kvs.map(([k, v]) => `"${sqlsanitize(k)}"`).join(",");
+    const vals = kvs
+      .filter(([k, v]: [any, any]) => !(v && v.next_version_by_id))
+      .map(([k, v]) => mkVal([k, v]));
+    if (!fieldsWithRows[fnames])
+      fieldsWithRows[fnames] = {
+        valPattern: `(${kvs
+          .map(([k, v]) => (reprAsJson(v) ? "json(?)" : "?"))
+          .join()})`,
+        vals: [],
+        count: 0,
+      };
+    fieldsWithRows[fnames].vals.push(...vals);
+    fieldsWithRows[fnames].count++;
+  }
+
+  for (const [k, v] of Object.entries(fieldsWithRows)) {
+    const { valPattern, vals, count } = v as any;
+    const sql = `insert ${ignoreExisting} ${replace} into "${sqlsanitize(
+      tbl
+    )}" (${k}) values ${Array(count).fill(valPattern).join(",")}`;
+    result.push({ sql, vals });
+  }
+  return result;
+};
+
+/**
+ *
+ * @param tbl
+ * @param whereObj
+ * @param queryFunc
+ * @returns
+ */
+export const doCount = async (
+  tbl: string,
+  whereObj: Where | undefined,
+  queryFunc: any,
+  limit?: number
+) => {
+  const { where, values } = mkWhere(whereObj, true);
+  const sql = limit
+    ? `SELECT COUNT(*) FROM (
+  SELECT 1 FROM "${sqlsanitize(tbl)}" ${where} limit ${+limit}) limited_count`
+    : `SELECT COUNT(*) FROM "${sqlsanitize(tbl)}" ${where}`;
+  const tq = await queryFunc(sql, values);  
+  return parseInt(tq.rows[0]["COUNT(*)"]);
+};
+
+/**
+ *
+ * @param tbl
+ * @param whereObj
+ * @param queryFunc
+ */
+export const doDeleteWhere = async (
+  tbl: string,
+  whereObj: Where | undefined,
+  queryFunc: any
+) => {
+  const { where, values } = mkWhere(whereObj, true);
+  const sql = `delete FROM "${sqlsanitize(tbl)}" ${where}`;
+  const tq = await queryFunc(sql, values);
+};
+
+/**
+ * Add unique constraint
+ * @param table_name - table name
+ * @param field_names - list of columns (members of constraint)
+ * @returns no result
+ */
+export const do_add_index = async (
+  table_name: string,
+  field_names: string[],
+  query_func: any,
+  is_unique: boolean,
+  logger?: any
+): Promise<void> => {
+  const sql = `create ${is_unique ? `unique ` : ""}index ${sqlsanitize(
+    table_name
+  )}_${field_names.map((f) => sqlsanitize(f)).join("_")}${
+    is_unique ? `_unique` : ""
+  } on "${sqlsanitize(table_name)}"(${field_names
+    .map((f) => `"${sqlsanitize(f)}"`)
+    .join(",")});`;
+  if (logger) logger(sql);
+  await query_func(sql);
+};
+
+/**
+ * Drop unique constraint
+ * @param table_name - table name
+ * @param field_names - list of columns (members of constraint)
+ * @returns no results
+ */
+export const do_drop_index = async (
+  table_name: string,
+  field_names: string[],
+  query_func: any,
+  is_unique: boolean,
+  logger?: any
+): Promise<void> => {
+  const sql = `drop index ${sqlsanitize(table_name)}_${field_names
+    .map((f) => sqlsanitize(f))
+    .join("_")}${is_unique ? `_unique` : ""};`;
+  if (logger) logger(sql);
+  await query_func(sql);
+};
+
+/**
+ * replace spaces with dashes
+ * @param s - string to slugify
+ * @returns slugified string
+ */
+export const slugify = (s: string): string =>
+  s.toLowerCase().replace(/\s+/g, "-");
+
+/**
+ * Run work after the current transaction commits. withTransaction here is a
+ * pass-through holding no connection, so there is nothing to defer and f runs
+ * immediately. For pg compatibility.
+ * @param f work to run
+ */
+export const afterCommit = async (f: () => Promise<void>) => {
+  await f();
+};
+
+/**
+ * simulate the pg transaction behavior with aborted flag
+ * @param f code to run in transaction
+ * @param onError error callback
+ * @returns result of f
+ */
+export const withTransaction = async (f: Function, onError: Function) => {
+  //await query("BEGIN;");
+  let aborted = false;
+  const rollback = async () => {
+    aborted = true;
+    //await query("ROLLBACK;");
+  };
+  try {
+    const result = await f(rollback);
+    //if (!aborted) await query("COMMIT;");
+    return result;
+  } catch (error) {
+    //if (!aborted) await query("ROLLBACK;");
+    if (onError) return onError(error);
+    else throw error;
+  }
+};
+
+/**
+ * simulate the pg with rollback behavior
+ * @param f code to run
+ * @param onError error callback
+ * @returns result of f
+ */
+export const tryCatchInTransaction = async (f: Function, onError: Function) => {
+  try {
+    return await f();
+  } catch (error) {
+    return await onError(error);
+  }
+};
+
+/**
+ * just a wrapper for withTransaction for pg compatibility
+ * @param f logic to run
+ * @param onError error callback
+ * @returns
+ */
+export const openOrUseTransaction = async (f: Function, onError: Function) => {
+  return await withTransaction(f, onError);
+};
+
+/**
+ * just a wrapper for withTransaction for pg compatibility
+ * @param f logic to run
+ * @param onError error callback
+ * @returns
+ */
+export const whenTransactionisFree = async (f: Function, onError: Function) => {
+  return await withTransaction(f, onError);
+};
+
+export const commitAndBeginNewTransaction = async () => {};
+/**
+ *
+ * @param queryFunc
+ * @returns
+ */
+export const doListTables = async (queryFunc: any) => {
+  const sql = "SELECT * FROM sqlite_master where type='table'";
+  const tq = await queryFunc(sql);
+  return tq.rows;
+};
+
+/**
+ *
+ * @param queryFunc
+ * @returns
+ */
+export const doListUserDefinedTables = async (queryFunc: any) => {
+  return (await doListTables(queryFunc)).filter(
+    ({ name }: { name: string }) => !name.startsWith("_sc_") && name !== "users"
+  );
+};
+
+/**
+ *
+ * @param queryFunc
+ * @returns
+ */
+export const doListScTables = async (queryFunc: any) => {
+  return (await doListTables(queryFunc)).filter(({ name }: { name: string }) =>
+    name.startsWith("_sc_")
+  );
+};

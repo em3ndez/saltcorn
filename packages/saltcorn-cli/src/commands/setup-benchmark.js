@@ -2,7 +2,7 @@
  * @category saltcorn-cli
  * @module commands/setup-benchmark
  */
-const { Command, flags } = require("@oclif/command");
+const { Command, Flags, Args } = require("@oclif/core");
 const { maybe_as_tenant } = require("../common");
 
 /**
@@ -14,30 +14,31 @@ class SetupBenchmarkCommand extends Command {
   /**
    * @returns {Promise<void>}
    */
-  async install_forum_pack() {
+  async install_forum_pack(flags) {
     const {
       fetch_pack_by_name,
       install_pack,
-    } = require("@saltcorn/data/models/pack");
-    const load_plugins = require("@saltcorn/server/load_plugins");
-    const { loadAllPlugins } = require("@saltcorn/server/load_plugins");
+    } = require("@saltcorn/admin-models/models/pack");
+    const Plugin = require("@saltcorn/data/models/plugin");
     const { init_multi_tenant } = require("@saltcorn/data/db/state");
-    await loadAllPlugins();
-    await init_multi_tenant(loadAllPlugins);
+    const { getAllTenants } = require("@saltcorn/admin-models/models/tenant");
+    await Plugin.loadAllPlugins();
+    const tenants = await getAllTenants();
+    await init_multi_tenant(Plugin.loadAllPlugins, undefined, tenants);
     const pack = await fetch_pack_by_name("Forum");
     await install_pack(pack.pack, flags.name, (p) =>
-      load_plugins.loadAndSaveNewPlugin(p)
+      Plugin.loadAndSaveNewPlugin(p)
     );
   }
-  
+
   /**
    * @returns {Promise<void>}
    */
   async run() {
-    const { args, flags } = this.parse(SetupBenchmarkCommand);
+    const { args, flags } = await this.parse(SetupBenchmarkCommand);
     await maybe_as_tenant(flags.tenant, async () => {
       // install pack
-      await this.install_forum_pack();
+      await this.install_forum_pack(flags);
       // create user if one does not exist
       const User = require("@saltcorn/data/models/user");
       const nusers = await User.count();
@@ -52,8 +53,8 @@ class SetupBenchmarkCommand extends Command {
       const user = await User.findOne({});
       // insert rows
       const Table = require("@saltcorn/data/models/table");
-      const threads = await Table.findOne({ name: "Threads" });
-      const replies = await Table.findOne({ name: "Replies" });
+      const threads = Table.findOne({ name: "Threads" });
+      const replies = Table.findOne({ name: "Replies" });
       const thread_id = await threads.insertRow({
         title: "How fast is Saltcorn?",
         body: "How fast is it really?",
@@ -68,18 +69,17 @@ class SetupBenchmarkCommand extends Command {
         thread: thread_id,
       });
       // install page
-      const { install_pack } = require("@saltcorn/data/models/pack");
+      const { install_pack } = require("@saltcorn/admin-models/models/pack");
       await install_pack(simple_page_pack, flags.name, () => {});
       // install file
       const { rick_file } = require("@saltcorn/data/tests/mocks");
       await rick_file();
-
     });
   }
 }
 
 /** @type {object[]} */
-SetupBenchmarkCommand.args = [];
+SetupBenchmarkCommand.args = {};
 
 /**
  * @type {string}
@@ -90,9 +90,13 @@ SetupBenchmarkCommand.description = `Setup an instance for benchmarking`;
  * @type {object}
  */
 SetupBenchmarkCommand.flags = {
-  tenant: flags.string({
+  tenant: Flags.string({
     char: "t",
     description: "tenant",
+  }),
+  name: Flags.string({
+    char: "n",
+    description: "name",
   }),
 };
 
@@ -105,7 +109,7 @@ const simple_page_pack = {
       name: "simplepage",
       title: "A simple page",
       description: "The simplest page ever",
-      min_role: 10,
+      min_role: 100,
       layout: {
         icon: "",
         type: "blank",

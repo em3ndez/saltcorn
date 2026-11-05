@@ -2,14 +2,32 @@
   "name": "saltcorn-monorepo",
   "private": true,
   "devDependencies": {
-    "better-docs": "^2.3.2",
-    "jest": "^25.1.0",
-    "lerna": "^3.20.2",
-    "supertest": "^4.0.2"
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "react-test-renderer": "18.2.0",
+    "eslint": "8.57.0",
+    "fs-extra": "11.3.5",
+    "jest": "^29.7.0",
+    "lint-staged": "^15.2.10",
+    "minipass": "3.1.6",
+    "typedoc": "^0.28.11",
+    "typedoc-plugin-rename-defaults": "^0.7.3",
+    "typescript": "5.9.2",
+    "webpack": "5.97.1",
+    "webpack-cli": "6.0.1"
   },
   "scripts": {
     "dev": "nodemon packages/saltcorn/index.js",
-    "test": "jest"
+    "test": "jest",
+    "bench:render": "node packages/saltcorn-data/benchmarks/render.mjs",
+    "tsc": "tsc --build && node ./packages/saltcorn-data/mobile-mocks/copy_excluded_files.cjs && node ./packages/saltcorn-mobile-builder/copy_static_assets.cjs",
+    "clean": "tsc --build --clean",
+    "docs": "typedoc --options typedoc_cfg.json",
+    "jsondocs": "typedoc --json packages/server/docs.json --options typedoc_cfg.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
   },
   "jest": {
     "testEnvironment": "node",
@@ -19,17 +37,88 @@
       "packages/saltcorn-sbadmin2"
     ]
   },
-  "workspaces": [
-    "./packages/*"
-  ],
   "nodemonConfig": {
     "verbose": true,
     "ext": "js,json,css",
     "ignore": [
       "plugin_packages/",
+      "plugins_folder/",
       "git_plugins/",
       "packages/saltcorn-data/app-locales/",
-      "packages/server/locales/"
+      "packages/server/locales/",
+      "packages/workflow-editor/dist/"
     ]
-  }
+  },
+  "lint-staged": {
+    "*.{js,ts,mjs,cjs}": "eslint --fix"
+  },
+  "eslintConfig": {
+    "ignorePatterns": [
+      "**/plugin_packages/**",
+      "**/plugins_folder/**",
+      "packages/server/public/**",
+      "packages/saltcorn-mobile-builder/tests/**",
+      "**/dist/**",
+      "*.test.js",
+      "packages/filemanager/public/build/bundle.js",
+      "packages/saltcorn-markup/bundle/**",
+      "packages/saltcorn-data/bundle/**",
+      "packages/saltcorn-sbadmin2/public/**",
+      "docs/**",
+      "packages/server/docs/**",
+      "deploy/"
+    ],
+    "extends": "eslint:recommended",
+    "parserOptions": {
+      "ecmaVersion": 2022
+    },
+    "env": {
+      "node": true,
+      "es2021": true
+    },
+    "rules": {
+      "no-unused-vars": "off",
+      "no-case-declarations": "off",
+      "no-empty": "warn",
+      "no-control-regex": "off",
+      "no-fallthrough": "warn"
+    },
+    "overrides": [
+      {
+        "files": [
+          "packages/server/**/*.js"
+        ],
+        "parserOptions": {
+          "sourceType": "module"
+        }
+      }
+    ]
+  },
+  "overrides": {
+    "webpack": "5.97.1",
+    "webpack-cli": "6.0.1",
+    "fs-extra": "11.3.5",
+    "immer": "9.0.21",
+    "undici": "7.12.0",
+    "node-gyp": ">=10.2.0",
+    "glob": ">=9.3.5",
+    "parse5": "7.2.1",
+    "parse5-htmlparser2-tree-adapter": "7.0.0",
+    "typescript": "5.9.2",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "react-test-renderer": "18.2.0",
+    "express": "^5.0.1",
+    "react-transition-group": "4.4.5",
+    "tough-cookie": "4.1.4",
+    "@types/tough-cookie": "4.0.5",
+    "ajv": "^8.18.0",
+    "tar": "^7.5.22"
+  },
+  "dependencies": {
+    "mobile-drag-drop": "^3.0.0-rc.0"
+  },
+  "workspaces": [
+    "./packages/*"
+  ]
 }

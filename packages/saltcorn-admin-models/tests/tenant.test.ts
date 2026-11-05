@@ -1,0 +1,154 @@
+import db from "@saltcorn/data/db/index";
+import Plugin from "@saltcorn/data/models/plugin";
+import {
+  getState,
+  add_tenant,
+  init_multi_tenant,
+  restart_tenant,
+} from "@saltcorn/data/db/state";
+import basePlugin from "@saltcorn/data/base-plugin";
+import reset from "@saltcorn/data/db/reset_schema";
+import fixtures from "@saltcorn/data/db/fixtures";
+getState()!.registerPlugin("base", basePlugin);
+import tenant from "../models/tenant.js";
+const {
+  create_tenant,
+  deleteTenant,
+  getAllTenants,
+  switchToTenant,
+  insertTenant,
+  Tenant,
+  getAllTenantRows,
+  eachTenant,
+} = tenant;
+import * as config from "@saltcorn/data/models/config";
+const { getConfig } = config;
+import {
+  afterAll,
+  describe,
+  it,
+  expect,
+  beforeAll,
+  jest,
+} from "@saltcorn/db-common/test_expect";
+
+afterAll(db.close);
+
+beforeAll(async () => {
+  // initialise this process's schema (tests run each file in its own Postgres
+  // schema so they can run in parallel)
+  await reset();
+  await fixtures();
+  if (db.supports_multiple_schemas) {
+    await db.drop_tenant_schema("test10");
+    await db.drop_tenant_schema("test11");
+  }
+});
+
+describe("Tenant", () => {
+  if (db.supports_multiple_schemas) {
+    it("can create a new tenant", async () => {
+      db.enable_multi_tenant();
+      await getState()!.setConfig("base_url", "http://example.com/");
+      await db.drop_tenant_schema("test10");
+
+      add_tenant("test10");
+
+      await switchToTenant(
+        await insertTenant(
+          "test10",
+          "foo@foo.com",
+          "tenant test10 will be template for test11"
+        ),
+        "http://test10.example.com/"
+      );
+
+      await create_tenant({
+        t: "test10",
+        loadAndSaveNewPlugin(plugin: Plugin): void {},
+        plugin_loader() {},
+      });
+      await db.runWithTenant("test10", async () => {
+        const ten = db.getTenantSchema();
+
+        expect(ten).toBe("test10");
+        // test base url
+        const base = await getConfig("base_url");
+        expect(base).toBe("http://test10.example.com/");
+        const state = getState()!;
+        expect(!!state).toBe(true);
+        const tables = state.tables;
+        expect(tables.length).toBe(1);
+        expect(tables[0].name).toBe("users");
+      });
+    });
+
+    it("check tenant list", async () => {
+      const tens = await getAllTenants();
+      expect(tens).toContain("test10");
+      expect(tens).not.toContain("public");
+      await (init_multi_tenant as any)(() => {}, undefined, tens);
+    });
+
+    it("can update template", async () => {
+      await Tenant.update("test10", { description: "new description 123" });
+      const t = await Tenant.findOne({ subdomain: "test10" });
+      expect(t?.description).toBe("new description 123");
+    });
+
+    it("can create a new tenant with template without description", async () => {
+      await getState()!.setConfig("tenant_template", "test10");
+
+      const tenant_template = getState()!.getConfig("tenant_template");
+      await db.drop_tenant_schema("test11");
+      add_tenant("test11");
+
+      await switchToTenant(
+        await insertTenant("test11", undefined, undefined, tenant_template),
+        "http://test11.example.com/"
+      );
+
+      await create_tenant({
+        t: "test11",
+        loadAndSaveNewPlugin(plugin: Plugin): void {},
+        plugin_loader() {},
+        tenant_template,
+      });
+      // check template
+      const t = await Tenant.findOne({ subdomain: "test11" });
+      expect(t?.template).toBe(tenant_template);
+    });
+
+    it("can find tenant", async () => {
+      const ten = await Tenant.find({ subdomain: "test11" });
+      expect(ten[0]?.subdomain).toContain("test11");
+    });
+
+    it("can get all tenant rows", async () => {
+      const tens = await getAllTenantRows();
+      expect(tens[0]?.subdomain).toContain("test10");
+    });
+
+    it("can run function for each tenant", async () => {
+      await eachTenant(async () => {
+        const domain = db.getTenantSchema();
+        expect(domain).toBeDefined();
+      });
+    });
+
+    it("can restart a tenant", async () => {
+      await db.runWithTenant("test10", async () => {
+        await restart_tenant(() => {});
+      });
+    });
+
+    it("can delete a tenant", async () => {
+      db.enable_multi_tenant();
+      await deleteTenant("test10");
+    });
+  } else {
+    it("does not support tenants on SQLite", async () => {
+      expect(db.isSQLite).toBe(true);
+    });
+  }
+});
